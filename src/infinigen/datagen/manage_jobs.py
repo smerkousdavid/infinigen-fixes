@@ -63,6 +63,7 @@ from infinigen.datagen.states import (
     cancel_job,
 )
 from infinigen.datagen.util import upload_util
+from infinigen.datagen.util.show_gpu_table import slurm_available
 from infinigen.datagen.util.submitit_emulator import (
     ImmediateLocalExecutor,
     LocalScheduleHandler,
@@ -81,7 +82,7 @@ NUM_CONCURRENT_ENVVAR = "INFINIGEN_NUMCONCURRENT_TARGET"
 
 
 def node_from_slurm_jobid(scene_id):
-    if not which("sacct"):
+    if not which("sacct") or not slurm_available():
         return None
 
     try:

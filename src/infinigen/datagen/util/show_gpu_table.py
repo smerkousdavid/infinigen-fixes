@@ -4,6 +4,9 @@
 # Authors: Lahav Lipson
 
 
+import functools
+import logging
+import os
 import re
 import subprocess
 import time
@@ -15,16 +18,52 @@ from shutil import which
 gres_regex = re.compile(".*gpu:([^:]+):([0-9]+).*").fullmatch
 cpu_regex = re.compile(".+/([0-9]+)[^/]+").fullmatch
 
+logger = logging.getLogger(__name__)
+
+SINFO_MAX_RETRIES = 10
+
+
+@functools.cache
+def slurm_available() -> bool:
+    """True only if `sinfo` exists AND can reach a SLURM controller.
+
+    Container images (e.g. runpod/pytorch) ship SLURM client binaries without a cluster;
+    `sinfo` then fails with "Could not establish a configuration source". Previously
+    sinfo() retried that forever (60 s sleeps), so manage_jobs stalled after the first task.
+    Set INFINIGEN_DISABLE_SLURM=1 to skip the probe entirely.
+    """
+    if os.environ.get("INFINIGEN_DISABLE_SLURM", "0") not in ("", "0", "false", "False"):
+        return False
+    exe = which("sinfo")
+    if exe is None:
+        return False
+    try:
+        subprocess.run(
+            [exe, "--noheader", "--format=%N"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        logger.warning(
+            f"{exe} is installed but SLURM is unreachable ({e!r}); treating as no SLURM"
+        )
+        return False
+
 
 def sinfo():
-    sinfo_command = "/usr/bin/sinfo --Node --format=%12N%22P%C%30G%10m --noheader"
-    while True:
+    if not slurm_available():
+        return ""
+    sinfo_command = [which("sinfo"), "--Node", "--format=%12N%22P%C%30G%10m", "--noheader"]
+    for attempt in range(SINFO_MAX_RETRIES):
         try:
-            return subprocess.check_output(sinfo_command.split()).decode()
-        except subprocess.CalledProcessError as e:
+            return subprocess.check_output(sinfo_command, timeout=60).decode()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             current_time_str = datetime.now().strftime("%m/%d %I:%M%p")
-            print(f"[{current_time_str}] sinfo failed with error:\n{e}")
+            print(f"[{current_time_str}] sinfo failed ({attempt + 1}/{SINFO_MAX_RETRIES}) with error:\n{e}")
             time.sleep(60)
+    raise RuntimeError(f"sinfo failed {SINFO_MAX_RETRIES} times in a row")
 
 
 def get_gpu_nodes():
@@ -50,7 +89,7 @@ def get_gpu_nodes():
 
 # e.g. nodes_with_gpus('gtx_1080', 'k80')
 def nodes_with_gpus(*gpu_names):
-    if not which("sinfo"):
+    if not slurm_available():
         return []
     if len(gpu_names) == 0:
         return []
