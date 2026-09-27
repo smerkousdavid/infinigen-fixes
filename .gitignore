@@ -16,7 +16,9 @@ optix7cache.db-wal
 # optional components, cloned manually (formerly git submodules)
 src/infinigen/OcMesher/
 src/infinigen/infinigen_gpl/
-src/infinigen/datagen/customgt/dependencies/
+src/infinigen/datagen/customgt/dependencies/*
+# vendored glad loader (not a git-cloned dependency): must stay tracked, incl. its .c sources
+!src/infinigen/datagen/customgt/dependencies/glad/
 
 render.png
 render.jpg
@@ -26,6 +28,7 @@ output.jpg
 .nfs*
 
 *.c
+!src/infinigen/datagen/customgt/dependencies/glad/src/*.c
 
 .coverage
 coverage.xml
