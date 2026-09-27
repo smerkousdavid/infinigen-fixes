@@ -46,7 +46,7 @@ def nature_gin(family, rng, a):
     if family == "nature_creatures":
         scene = "desert.gin"  # plain/forest coarse+populate take >1 h on 8 vCPUs; desert ~12 min
         wind = float(rng.uniform(0.015, 0.035))
-        extra = ["compose_nature.ground_creatures_chance=1.0", "compose_nature.max_ground_creatures=4",
+        extra = ["compose_nature.ground_creatures_chance=1.0", "compose_nature.max_ground_creatures=2",  # rig weights ~7 min per creature on 8 vCPUs
                  "compose_nature.ground_creature_registry=[(@CarnivoreFactory,1),(@HerbivoreFactory,1.5)]",
                  "compose_nature.flying_creatures_chance=0.5", "compose_nature.center_distance=15"]
         flutter = 0.0
@@ -59,7 +59,10 @@ def nature_gin(family, rng, a):
     common = [f"execute_tasks.frame_range=[1,{a.frames}]", f"execute_tasks.generate_resolution=({a.width},{a.height})",
               f"camera.spawn_camera_rigs.n_camera_rigs={a.views}",
               "camera.spawn_camera_rigs.camera_rig_config=[{'loc': (0, 0, 0), 'rot_euler': (0, 0, 0)}]",
-              "compose_nature.inview_distance=35", "placement.populate_all.dist_cull=30"]
+              "compose_nature.inview_distance=35", "placement.populate_all.dist_cull=30",
+              # SphericalMesher asserts fov < 90 deg for every camera; OcMesher handles V wide cameras (and is what
+              # upstream uses for video)
+              'fine_terrain.mesher_backend="OcMesher"']
     return scene, wind, flutter, common + extra
 
 

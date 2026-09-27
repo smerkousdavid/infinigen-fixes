@@ -367,7 +367,13 @@ def sample_view(rng, T, fps, intr, anchor, scale, target=None, target_points=Non
         jit = bool(rng.random() < jitter_prob)
         jparams = None
         if jit:
-            pos, R, jparams, _, _ = apply_jitter(rng, pos, R, fps)
+            pos0, R0 = pos, R
+            pos, R, jparams, dpos, drot = apply_jitter(rng, pos, R, fps)
+            # the un-jittered path is stored so the rendered camera can be checked against it (gate), and so
+            # consumers can recover the smooth path
+            jparams = dict(jparams, applied_trans_rms_m=float(np.sqrt((dpos ** 2).sum(1).mean())),
+                           applied_rot_rms_deg=float(np.degrees(np.sqrt((drot ** 2).sum(1).mean()))),
+                           pre_jitter_pos=np.round(pos0, 5), pre_jitter_forward=np.round(-R0[:, :, 2], 5))
         tp = target_points if target_points is not None else (target if pt in NEEDS_TARGET else None)
         ok, rep = validate_path(pos, R, intr, clearance_fn=clearance_fn, ray_fn=ray_fn,
                                 target=tp if pt in NEEDS_TARGET else None, **val_kw)
