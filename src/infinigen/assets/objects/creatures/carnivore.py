@@ -3,6 +3,8 @@
 
 # Authors: Alexander Raistrick
 
+import logging
+
 import gin
 import mathutils
 import numpy as np
@@ -22,6 +24,8 @@ from infinigen.core.placement.factory import AssetFactory
 from infinigen.core.util import blender as butil
 from infinigen.core.util.math import clip_gaussian
 from infinigen.core.util.random import weighted_sample
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["CarnivoreFactory"]
 
@@ -242,10 +246,15 @@ class CarnivoreFactory(AssetFactory):
         self.clothsim_skin = clothsim_skin
 
         if self.hair and (self.animation_mode is not None or self.clothsim_skin):
-            raise NotImplementedError(
-                "Dynamic hair is not yet fully working. "
-                "Please disable either hair or both of animation/clothsim"
+            # Static particle hair does not follow the rig / cloth sim. compose_nature always
+            # passes animation_mode="idle", so raising here made every hairy ground creature
+            # crash the scene; drop the hair instead (animated, hairless creature).
+            logger.warning(
+                f"{type(self).__name__}: hair is not supported with "
+                f"animation_mode={self.animation_mode!r} / clothsim_skin={self.clothsim_skin}; "
+                "disabling hair"
             )
+            self.hair = False
 
         body_material_fac = weighted_sample(material_assignments.carnivore)
         self.body_material = body_material_fac()
