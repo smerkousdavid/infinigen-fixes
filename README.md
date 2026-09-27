@@ -16,6 +16,61 @@
 <a href="https://youtu.be/6tgspeI-GHY"> <img src="docs/images/infinigen_teaser.png" width="100%"></a>
 </div>
 
+## infinigen-fixes (branch `p4d-fixes`): bug fixes + realistic-motion multi-view 4D ground truth
+
+This fork is based on upstream `princeton-vl/infinigen` at `3f58bb8` (v2.0.0a2), with upstream history kept.
+It adds a few bug fixes, plus an opt-in package `infinigen.p4d` that produces multi-view video with 4D point
+tracks for point-tracking and 4D-reconstruction training. Upstream files change only where a fix requires it.
+
+### Fixes (one commit each)
+1. **customgt glad sources.** `customgt/dependencies/glad/src/glad.c` and `glad_egl.c` were dropped by the `*.c`
+   `.gitignore` rule, so `INFINIGEN_INSTALL_CUSTOMGT=True` failed ("Cannot find source file ... glad.c").
+   The fix restores them from v1.19.0 and adds `.gitignore` exceptions.
+2. **SnakeFactory crash.** `reptile_postprocessing()` and `chameleon_postprocessing()` had the wrong arity for
+   `join_and_rig_parts(postprocess_func(root))`, raising `TypeError` for every snake (e.g. `desert.gin`).
+3. **Animated hairy creatures.** Herbivore and carnivore raised `NotImplementedError` whenever hair and animation
+   were both set, and `compose_nature` always animates them. The fix drops the hair with a warning instead.
+4. **SLURM probe hang.** Container images ship `sinfo` without a cluster, and `sinfo()` retried forever, stalling
+   `manage_jobs` after coarse. The fix adds a cached `slurm_available()` probe with a timeout, bounded retries, and
+   an `INFINIGEN_DISABLE_SLURM=1` switch.
+
+### Features (`src/infinigen/p4d/`)
+- **`cameras.py`: 4 synchronized cameras per scene.** Each view gets an independent path type: orbit, spin, crane,
+  dolly, follow-object, handheld or near-static.
+  - About 25 % of views get Ornstein-Uhlenbeck jitter on translation (1-4 cm) and rotation (0.3-1.5°), plus a
+    small shake.
+  - Validity checks: clearance ≥ 0.3 m, target in frustum ≥ 80 % of frames, median depth ≥ 0.3 m, the camera
+    stays inside the room, and a sky-fraction limit.
+  - Unit tests: `tests/p4d/test_cameras.py`.
+- **`motion/creatures.py`: walking creatures.** Upstream `populate_all` re-created creature factories without the
+  coarse-stage `animation_mode`, so creatures were never rigged. With this, herbivores and carnivores use the
+  run gait on terrain walks, and a vertex-motion gate checks that they move.
+- **`motion/wind.py`: wind on vegetation.** A geometry-nodes wind (height-weighted sway, a shared gust field and
+  leaf flutter) on trees, bushes, grass and scatter sources. Topology stays constant.
+- **`motion/objects.py`: indoor rigid-body motion.** Bullet rigid-body drops, tosses, slides and rolling balls,
+  plus keyframed pushed chairs.
+- **`motion/articulation.py`: articulated Infinigen-Sim assets in v2 rooms.** Assets such as cabinet, drawer,
+  dishwasher, refrigerator and door are placed against walls, and every joint is animated with an independent
+  profile: open, close, partial, open-close or repeated.
+- **`gt.py`: multi-view render and point tracks.** V-view Cycles render: RGB, z-depth, normals, object index and
+  Vector flow. It also runs a unified mesh-surface point tracker that produces one world-track bank shared by
+  all views:
+  - (triangle, barycentric) samples on constant-topology evaluated meshes;
+  - instance samples for particles, such as falling leaves;
+  - about 5 % interior points;
+  - static background points.
+
+  The output is the raw `p4d_multiview_raw_v1` format, converted to the p4d-1.1 schema by the point4d-datasets
+  pipeline (`convert/infinigen.py`).
+- **`run_scene.py` and `batch.py`: scene drivers.** Families: `nature_creatures`, `nature_wind`,
+  `indoor_physics`, `indoor_artic` and `indoor_flying`. `nature_driver.py` wraps `generate_nature` unchanged.
+
+```bash
+bash scripts/p4d/install_pod.sh        # fork install on a Linux x86 GPU box (no patches needed)
+python -m infinigen.p4d.run_scene --family indoor_physics --seed 0 --out outputs/p4d/phys0
+python -m infinigen.p4d.batch --plan plan.txt --out outputs/p4d/batch --jobs 3
+```
+
 ## Getting Started
 
 ### Getting Started with Infinigen V2
