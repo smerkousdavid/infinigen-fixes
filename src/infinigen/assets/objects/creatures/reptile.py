@@ -426,7 +426,23 @@ def animate_lizard_run(root, arma, params, ik_targets):
     # creature_animation.animate_run(root, arma, ik_targets)
 
 
-def reptile_postprocessing(body_parts, extras, params):
+def _parts_from_root(root):
+    body_parts = joining.get_parts(root, main_body=True)
+    extras = [o for o in joining.get_parts(root, main_body=False) if o not in body_parts]
+    return body_parts, extras
+
+
+def reptile_postprocessing(root_or_body_parts, extras=None, params=None):
+    """Material postprocess for reptiles.
+
+    joining.join_and_rig_parts calls ``postprocess_func(root)``; older call sites passed
+    (body_parts, extras, params). Accept both (params is unused).
+    """
+    if extras is None:
+        body_parts, extras = _parts_from_root(root_or_body_parts)
+    else:
+        body_parts = root_or_body_parts
+
     def get_extras(k):
         return [o for o in extras if k in o.name]
 
@@ -440,7 +456,12 @@ def reptile_postprocessing(body_parts, extras, params):
     nose.apply(get_extras("Nose"))
 
 
-def chameleon_postprocessing(body_parts, extras, params):
+def chameleon_postprocessing(root_or_body_parts, extras=None, params=None):
+    if extras is None:
+        body_parts, extras = _parts_from_root(root_or_body_parts)
+    else:
+        body_parts = root_or_body_parts
+
     def get_extras(k):
         return [o for o in extras if k in o.name]
 
