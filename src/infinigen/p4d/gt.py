@@ -703,11 +703,14 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
     # through their GN instances, e.g. leaves)
     dyn = [o for o in rend if o.type == "MESH" and kinds[o.pass_index] in DYNAMIC_KINDS
            and not (o.particle_systems and len(o.particle_systems))]
+    logger.info("p4d clearance: %d renderable objects, %d frames", len(rend), T)
     geometry_checks = clearance_report(rend, cameras, frames)
+    logger.info("p4d clearance passed; preparing tracks on %d meshes and %d instancers", len(dyn), len(instancers))
     s.frame_set(fs)
     t1 = time.time()
     tracker = Tracker(rng, dyn, instancers, n_mesh=n_mesh, n_inst=n_inst, interior_frac=interior_frac,
                       cameras=cameras, frames=frames)
+    logger.info("p4d sampled %d mesh objects and %d instances", len(tracker.mesh), len(tracker.inst))
     for instance in tracker.inst:
         obj = bpy.data.objects[instance["src"]]
         parent = bpy.data.objects[instance["parent"]]
@@ -727,6 +730,8 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
     for f in frames:
         s.frame_set(f)
         tracker.step()
+        if (f - fs + 1) % 24 == 0 or f == fe:
+            logger.info("p4d evaluated tracks: %d/%d frames", f - fs + 1, T)
     if tracker.report["dropped_topology"]:
         raise ValueError(f"tracked topology changed: {tracker.report['dropped_topology']}")
     xyz, nrm, pidx, surf, src = tracker.arrays()
