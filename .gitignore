@@ -119,3 +119,4 @@ usd/
 docs/source/api/infinigen2*.rst
 docs/source/api/modules.rst
 docs/source/api/
+src/infinigen/p4d/source_manifest.json

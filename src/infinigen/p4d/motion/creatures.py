@@ -288,7 +288,7 @@ def bake_contact_gait(root, arma, targets, bvh):
                             stance_slip_max_m=float(slip.max(initial=0))))
     report = dict(gait=gait, armature=arma.name, stride_m=stride, duty_factor=duty,
                   root_distance_m=float(distance[-1]), feet=reports)
-    report["evaluated_contacts"] = evaluate_contacts(report, frames)
+    fit_contact_height(root, report, frames)
     logger.info("p4d evaluated %s gait: %s", gait, report["evaluated_contacts"])
     root["p4d_gait_report"] = json.dumps(report)
     root["p4d_kind"] = "creature"
@@ -308,16 +308,43 @@ def evaluate_contacts(gait, frames):
         for foot in gait["feet"]:
             position = evaluated.matrix_world @ evaluated.pose.bones[foot["bone"]].tail
             samples[foot["bone"]].append(list(position))
-    errors, slips = [], []
+    errors, slips, vertical_errors = [], [], []
     for foot in gait["feet"]:
         actual = np.asarray(samples[foot["bone"]])
         stance = np.asarray(foot["stance"])
         errors.extend(np.linalg.norm(actual - foot["target_world"], axis=1)[stance].tolist())
+        vertical_errors.extend((actual[:, 2] - np.asarray(foot["target_world"])[:, 2])[stance].tolist())
         stable = stance[1:] & stance[:-1] & (np.diff(foot["cycles"]) == 0)
         slips.extend(np.linalg.norm(np.diff(actual, axis=0), axis=1)[stable].tolist())
     return dict(endpoint_target_error_p95_m=float(np.percentile(errors, 95)) if errors else None,
                 stance_step_slip_p95_m=float(np.percentile(slips, 95)) if slips else None,
+                positive_vertical_error_max_m=max(0., max(vertical_errors, default=0.)),
                 stance_samples=len(errors), stable_steps=len(slips), frames_checked=len(frames))
+
+
+def fit_contact_height(root, gait, frames):
+    """Lower a terrain-centred body enough for its downslope stance feet to reach.
+
+    Placeholder height is sampled under the body centre. On slopes, straight
+    legs cannot reach lower footholds. Keep the body offset constant through the
+    clip to avoid an IK-driven vertical wobble; solve actual endpoints again.
+    """
+    import bpy
+    from mathutils import Vector
+
+    before = evaluate_contacts(gait, frames)
+    drop = before["positive_vertical_error_max_m"] + .025
+    if drop > .45:
+        raise ValueError(f"terrain requires an excessive body height correction: {root.name}: {drop:.3f}m")
+    bpy.context.scene.frame_set(frames[0])
+    displacement = Vector((0, 0, -drop))
+    if root.parent is not None:
+        displacement = root.parent.matrix_world.to_3x3().inverted() @ displacement
+    root.location += displacement
+    root["p4d_contact_height_fitted"] = True
+    gait["body_height_lowering_m"] = float(drop)
+    gait["evaluated_contacts"] = evaluate_contacts(gait, frames)
+    return gait
 
 
 def vertex_motion_report(objects, frames, depsgraph=None):

@@ -559,6 +559,9 @@ def _git_commit():
 
 UPSTREAM_COMMIT = "3f58bb886bb1bda681d41240344fe3126ac0e9bd"
 
+from infinigen.p4d.runtime import source_identity
+SOURCE_IDENTITY = source_identity()
+
 
 def clearance_report(objects, cameras, frames):
     """Check every evaluated camera frame against static and moving mesh geometry."""
@@ -643,6 +646,8 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
     for f in frames:
         s.frame_set(f)
         tracker.step()
+    if tracker.report["dropped_topology"]:
+        raise ValueError(f"tracked topology changed: {tracker.report['dropped_topology']}")
     xyz, nrm, pidx, surf, src = tracker.arrays()
     t_track = time.time() - t1
     motion = dict(motion or {})
@@ -693,7 +698,8 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
               ("static",) + DYNAMIC_KINDS}
     meta = dict(format="p4d_multiview_raw_v1", family=family, seed=int(seed), frames=T, width=W, height=H,
                 fps=float(s.render.fps / s.render.fps_base), infinigen_commit=UPSTREAM_COMMIT,
-                fork_commit=_git_commit(), world_frame="Blender scene world (Z up, metres)",
+                fork_commit=SOURCE_IDENTITY.get("fork_commit") or _git_commit(),
+                render_source=SOURCE_IDENTITY, world_frame="Blender scene world (Z up, metres)",
                 views=[dict(m, view_id=i) for i, m in enumerate(views_meta or [{} for _ in cameras])],
                 motion=motion,
                 geometry_checks=geometry_checks,
@@ -725,6 +731,20 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
     from infinigen.p4d.motion import wind
 
     s = bpy.context.scene
+    # Saved populated scenes may predate the body-height correction. Reuse the
+    # rig and its exact world-space foot targets, then verify evaluated contacts.
+    unhide_renderables()
+    from infinigen.p4d.motion.creatures import fit_contact_height
+    for obj in list(s.objects):
+        if obj.get("p4d_gait_report") and not obj.get("p4d_contact_height_fitted"):
+            gait = json.loads(obj["p4d_gait_report"])
+            fit_contact_height(obj, gait, list(range(s.frame_start, s.frame_end + 1)))
+            obj["p4d_gait_report"] = json.dumps(gait)
+        if obj.get("p4d_gait_report"):
+            gait = json.loads(obj["p4d_gait_report"])
+            contact = gait["evaluated_contacts"]
+            if (contact["endpoint_target_error_p95_m"] > .05 or contact["stance_step_slip_p95_m"] > .02):
+                raise ValueError(f"evaluated foot contacts failed before rendering: {obj.name}: {contact}")
     rigs = cam_util.get_camera_rigs()
     cams = [r.children[0] for r in rigs]
     views = [json.loads(r["p4d_view"]) if "p4d_view" in r else {"path_type": "infinigen_default"} for r in rigs]
