@@ -79,7 +79,8 @@ def run_one(fam, seed, a):
         if q.returncode != 0 or len(clips) != 1:
             rec.update(status="qa_failed", qa_tail=(q.stdout + q.stderr)[-3000:])
             return _fail(a, name, rec)
-        gates = check(raw, clips[0], expected_frames=a.frames, expected_size=(a.width, a.height), expected_fps=a.fps)
+        gates = check(raw, clips[0], expected_frames=a.frames, expected_size=(a.width, a.height),
+                      expected_fps=a.fps, expected_samples=a.samples)
         (qa / f"{raw.name}.gates.json").write_text(json.dumps(gates, indent=2))
         if not gates["PASS"]:
             rec.update(status="gates_failed", failures=gates["failures"])

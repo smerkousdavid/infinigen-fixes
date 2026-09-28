@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 
-def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_fps=24):
+def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_fps=24, expected_samples=128):
     raw = Path(raw)
     scene = json.loads((raw / "scene_meta.json").read_text())
     with tarfile.open(clip_tar) as tar:
@@ -22,6 +22,10 @@ def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_
     require(scene.get("frames") == expected_frames, "unexpected pilot frame count")
     require((scene.get("width"), scene.get("height")) == expected_size, "unexpected pilot resolution")
     require(scene.get("fps") == expected_fps, "unexpected pilot frame rate")
+    render = scene.get('render', {})
+    require(render.get('samples') == expected_samples, 'unexpected Cycles sample count')
+    require(render.get('motion_blur') is False and render.get('depth_of_field') is False,
+            'sharp ground-truth rendering settings missing or disabled')
     require(meta.get("num_views") == 4, "requires exactly four synchronized views")
     for name in ("rgb", "depth", "normals", "instance", "semantic", "flow", "tracks"):
         require(meta["modalities"].get(name, {}).get("present"), f"missing modality: {name}")
