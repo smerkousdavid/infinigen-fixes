@@ -920,6 +920,7 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
     for o in s.objects:  # scatter instancers of wind sources are dynamic
         if o.name.startswith("scatter:") and wind_strength > 0 and wind_scatters and wind.VEGETATION.search(o.name):
             o["p4d_kind"] = "wind"
+    wind_setup_s = time.time() - tw
     out = Path(out_dir) if out_dir else Path(frames_folder) / "p4d"
     tiers = list(dict.fromkeys(v.get("overlap_target", "none") for v in views))
     if render_tiers:
@@ -932,7 +933,7 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
         destination = out.with_name(out.name + "_" + tier) if tier != "none" else out
         result = export_scene(destination, [cams[i] for i in indices], family, seed,
                               views_meta=[views[i] for i in indices], motion=motion, samples=samples, n_mesh=n_mesh,
-                              n_inst=n_inst, n_static=n_static, extra_timing={"wind_setup_s": time.time() - tw},
+                              n_inst=n_inst, n_static=n_static, extra_timing={"wind_setup_s": wind_setup_s},
                               instancer_filter=lambda o: o.get("p4d_kind") == "wind")
         result.update(scene_id=out.name, overlap_target=tier if tier != "none" else None)
         (destination / "scene_meta.json").write_text(json.dumps(result, indent=1, default=str))
