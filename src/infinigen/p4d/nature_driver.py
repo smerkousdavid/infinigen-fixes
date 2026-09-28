@@ -126,13 +126,15 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
             minimum_radius = max(7., 1.8 * max(heights.values()))
         else:
             anchor, rot = anchors[0]
-            forward = np.array(_euler_to_forward(rot))
-            loc, *_ = bvh.ray_cast(Vector(anchor), Vector(forward), 30.)
-            centre = np.array(loc) if loc is not None else anchor + 8 * forward
+            tree_pois = [o for o in scene.objects if creatures.placeholder_factory(o) == 'TreeFactory']
+            if not tree_pois:
+                raise ValueError('wind scene requires tree placeholders for camera targets')
+            chosen = min(tree_pois, key=lambda o: np.linalg.norm(np.asarray(o.matrix_world.translation) - anchor))
+            centre = np.asarray(chosen.matrix_world.translation).copy()
             gz = ground_z(*centre[:2])
             if gz is not None:
-                centre[2] = gz + 1
-            target, target_name = np.tile(centre, (T, 1)), "vegetation_region"
+                centre[2] = gz + 3
+            target, target_name = np.tile(centre, (T, 1)), chosen.name
 
         def anchor_fn(rng):
             for _ in range(200):

@@ -68,6 +68,12 @@ Creature trajectories are separated using evaluated actor bounds across every
 frame, followed by terrain contact rebinding and a second actor-clearance check.
 `python -m infinigen.p4d.prepare_creatures --source SCENE --out PREPARED` saves this
 validated motion into a copied fine-stage checkpoint with artifact checksums.
+Nature camera sampling checks signed height above the terrain as well as nearest
+surface distance, since a camera buried below ground can have large unsigned
+clearance. Prepared creature checkpoints explicitly repair buried paths and record
+the translation and re-aiming. Wind rigs target populated vegetation; use
+`python -m infinigen.p4d.prepare_wind --source SCENE --out PREPARED` to reframe a
+saved wind scene around its actual trees before rendering.
 
 ## Overlap curriculum
 
