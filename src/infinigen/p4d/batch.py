@@ -64,6 +64,10 @@ def run_one(fam, seed, a):
     env = dict(os.environ, PYTHONPATH=str(a.p4d_repo / "stream"))
     for raw in raws:
         meta = json.loads((raw / "scene_meta.json").read_text())
+        if not meta.get("resolved_config") or meta.get("scene_id") != name:
+            rec.update(status="generate_incomplete", raw=str(raw),
+                       reason="scene driver has not finalized configuration/provenance")
+            return _fail(a, name, rec)
         meta["split"] = a.split
         (raw / "scene_meta.json").write_text(json.dumps(meta, indent=1))
         report = qa / f"{raw.name}.conversion.json"
