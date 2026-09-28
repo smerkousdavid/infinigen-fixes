@@ -138,7 +138,12 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
                 gz = ground_z(*xy)
                 if gz is None:
                     continue
-                p = np.r_[xy, gz + rng.uniform(1.2, 2.)]
+                height = gz + rng.uniform(1.2, 2.)
+                if moving:
+                    height = max(gz + rng.uniform(1.7, 2.5), target[0, 2] + .5)
+                    if height - gz > 3.5:
+                        continue
+                p = np.r_[xy, height]
                 if clearance_fn([p])[0] > .4:
                     return p
             raise ValueError("no clear nature camera anchor")
@@ -176,7 +181,7 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
                     tier_targets.append(region)
                     target_names.append(name)
             sampled = sample_rig(rng, T, fps, intrs, anchor_fn, target, tier, clearance_fn, ray_fn,
-                                 view_targets=tier_targets)
+                                 view_targets=tier_targets, max_tries=400 if tier == "low" else 160)
             for i, (rig, view) in enumerate(zip(rigs, sampled)):
                 C.blender_apply_path(rig, view["pos"], view["R"], frame_start=fs)
                 meta = dict(view["meta"], view_id=i, seed=int(P4D["seed"] * 100 + k * 4 + i),
