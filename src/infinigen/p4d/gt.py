@@ -407,7 +407,20 @@ class Tracker:
                         srcmesh[srcname] = co, tri, tri_areas(co, tri)
             keys = sorted(candidates)
             if keys:
-                pick = rng.choice(len(keys), min(len(keys), max(1, n_inst // pts_per_inst)), replace=False)
+                # Dense grass scatters can outnumber falling leaves by 1000:1.
+                # Reserve equal budgets for particles and other instances so
+                # leaf supervision survives camera-independent sampling.
+                strata = {}
+                for i, key in enumerate(keys):
+                    parent = bpy.data.objects[key[0]]
+                    label = "particle" if len(parent.particle_systems) else "other_instance"
+                    strata.setdefault(label, []).append(i)
+                budget = min(len(keys), max(1, n_inst // pts_per_inst))
+                pick = []
+                groups = sorted(strata.values(), key=len)
+                for j, group in enumerate(groups):
+                    count = min(len(group), (budget - len(pick)) // (len(groups) - j))
+                    pick.extend(rng.choice(group, count, replace=False).tolist())
                 for i in sorted(pick):
                     key = keys[i]
                     srcname = candidates[key]
@@ -653,9 +666,10 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
     motion = dict(motion or {})
     motion["gaits"] = {o.name: json.loads(o["p4d_gait_report"]) for o in s.objects if o.get("p4d_gait_report")}
     if motion["gaits"]:
-        from infinigen.p4d.motion.creatures import evaluate_contacts
+        from infinigen.p4d.motion.creatures import evaluate_contacts, terrain_bvh
+        ground = terrain_bvh(render_only=True)
         for gait in motion["gaits"].values():
-            gait["evaluated_contacts"] = evaluate_contacts(gait, frames)
+            gait["evaluated_contacts"] = evaluate_contacts(gait, frames, bvh=ground)
     if vertex_check:
         chk = [o for o in dyn if kinds[o.pass_index] in ("creature", "wind", "articulated", "deform")]
         chk = sorted(chk, key=lambda o: -tracker.report["objects"].get(o.name, {}).get("n", 0))[:60]
@@ -734,16 +748,22 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
     # Saved populated scenes may predate the body-height correction. Reuse the
     # rig and its exact world-space foot targets, then verify evaluated contacts.
     unhide_renderables()
-    from infinigen.p4d.motion.creatures import fit_contact_height
+    from infinigen.p4d.motion.creatures import bake_contact_gait, terrain_bvh
+    has_gaits = any(o.get("p4d_gait_report") for o in s.objects)
+    ground = terrain_bvh(render_only=True) if has_gaits else None
     for obj in list(s.objects):
-        if obj.get("p4d_gait_report") and not obj.get("p4d_contact_height_fitted"):
+        if obj.get("p4d_gait_report") and not obj.get("p4d_final_terrain_contacts"):
             gait = json.loads(obj["p4d_gait_report"])
-            fit_contact_height(obj, gait, list(range(s.frame_start, s.frame_end + 1)))
-            obj["p4d_gait_report"] = json.dumps(gait)
+            if obj.get("p4d_contact_original_location") is not None:
+                obj.location = obj["p4d_contact_original_location"]
+            bake_contact_gait(obj, bpy.data.objects[gait["armature"]],
+                              [bpy.data.objects[f["target"]] for f in gait["feet"]], ground)
+            obj["p4d_final_terrain_contacts"] = True
         if obj.get("p4d_gait_report"):
             gait = json.loads(obj["p4d_gait_report"])
             contact = gait["evaluated_contacts"]
-            if (contact["endpoint_target_error_p95_m"] > .05 or contact["stance_step_slip_p95_m"] > .02):
+            if (contact["endpoint_target_error_p95_m"] > .05 or contact["stance_step_slip_p95_m"] > .02
+                    or contact["terrain_height_error_p95_m"] is None or contact["terrain_height_error_p95_m"] > .03):
                 raise ValueError(f"evaluated foot contacts failed before rendering: {obj.name}: {contact}")
     rigs = cam_util.get_camera_rigs()
     cams = [r.children[0] for r in rigs]

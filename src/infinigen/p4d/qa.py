@@ -95,7 +95,9 @@ def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_
                     and contact.get("endpoint_target_error_p95_m") is not None
                     and contact.get("stance_step_slip_p95_m") is not None
                     and contact["endpoint_target_error_p95_m"] <= .05
-                    and contact["stance_step_slip_p95_m"] <= .02,
+                    and contact["stance_step_slip_p95_m"] <= .02
+                    and contact.get("terrain_height_error_p95_m") is not None
+                    and contact["terrain_height_error_p95_m"] <= .03,
                     f"evaluated {gait.get('gait')} foot contacts failed/missing")
         deformation = scene["motion"].get("vertex_motion", {})
         require(any(v.get("max_local_deform_m", 0) > .02 for v in deformation.values()), "no nonrigid creature gait")

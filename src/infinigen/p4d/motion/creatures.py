@@ -41,7 +41,7 @@ GROUND_WALKERS = ("HerbivoreFactory", "CarnivoreFactory")
 SPEED_MPS = {"HerbivoreFactory": (0.8, 1.6), "CarnivoreFactory": (1.0, 2.2)}
 
 
-def terrain_bvh():
+def terrain_bvh(render_only=False):
     """BVH of the coarse/fine terrain meshes in the current scene (world space)."""
     import bpy
     from mathutils.bvhtree import BVHTree
@@ -49,6 +49,9 @@ def terrain_bvh():
     dg = bpy.context.evaluated_depsgraph_get()
     cand = [o for o in bpy.data.objects if o.type == "MESH" and re.search(r"terrain", o.name, re.I)
             and "atmosphere" not in o.name.lower() and "liquid" not in o.name.lower()]
+    if render_only:
+        from infinigen.p4d.gt import renderable
+        cand = [o for o in cand if renderable(o)]
     opaque = [o for o in cand if "opaque" in o.name.lower()] or cand
     if not opaque:
         return None
@@ -219,7 +222,16 @@ def bake_contact_gait(root, arma, targets, bvh):
     if len(feet) != 4 or bvh is None:
         raise ValueError(f"contact gait requires four feet and terrain: {root.name}, feet={len(feet)}")
     inverse = np.linalg.inv(np.array(root.matrix_world))
-    rest = np.array([np.array(o.matrix_world.translation) @ inverse[:3, :3].T + inverse[:3, 3] for o in feet])
+    bones = [[bone.name for bone in arma.pose.bones for con in bone.constraints
+              if con.type == "IK" and con.target == foot] for foot in feet]
+    if any(len(names) != 1 for names in bones):
+        raise ValueError(f"ambiguous IK endpoints: {bones}")
+    bone_names = [names[0] for names in bones]
+    # Rest-bone endpoints also work when rebinding a saved gait to fine terrain;
+    # animated targets at frame 1 already contain a stride offset.
+    rest_world = [np.array(arma.matrix_world @ arma.data.bones[name].tail_local) for name in bone_names]
+    rest = np.array([p @ inverse[:3, :3].T + inverse[:3, 3] for p in rest_world])
+    rest_poses = [arma.matrix_world @ arma.data.bones[name].matrix_local for name in bone_names]
     mats = []
     for frame in frames:
         scene.frame_set(frame)
@@ -235,7 +247,7 @@ def bake_contact_gait(root, arma, targets, bvh):
     left = rest[:, 1] > np.median(rest[:, 1])
     reports = []
     for i, foot in enumerate(feet):
-        world_pose = foot.matrix_world.copy()
+        world_pose = rest_poses[i]
         offset = (0. if front[i] == left[i] else .5) if gait == "run" else (
             0. if front[i] and left[i] else .5 if front[i] else .75 if left[i] else .25)
         phases = phase + offset
@@ -279,16 +291,12 @@ def bake_contact_gait(root, arma, targets, bvh):
         values = np.asarray(values)
         stable = np.asarray(stance[1:]) & np.asarray(stance[:-1]) & (np.diff(cycles) == 0)
         slip = np.linalg.norm(np.diff(values, axis=0), axis=1)[stable]
-        bones = [bone.name for bone in arma.pose.bones for con in bone.constraints
-                 if con.type == "IK" and con.target == foot]
-        if len(bones) != 1:
-            raise ValueError(f"ambiguous IK endpoint for {foot.name}: {bones}")
-        reports.append(dict(target=foot.name, bone=bones[0], stance=stance, cycles=cycles.tolist(),
+        reports.append(dict(target=foot.name, bone=bone_names[i], stance=stance, cycles=cycles.tolist(),
                             target_world=values.tolist(),
                             stance_slip_max_m=float(slip.max(initial=0))))
     report = dict(gait=gait, armature=arma.name, stride_m=stride, duty_factor=duty,
                   root_distance_m=float(distance[-1]), feet=reports)
-    fit_contact_height(root, report, frames)
+    fit_contact_height(root, report, frames, bvh=bvh)
     logger.info("p4d evaluated %s gait: %s", gait, report["evaluated_contacts"])
     root["p4d_gait_report"] = json.dumps(report)
     root["p4d_kind"] = "creature"
@@ -296,9 +304,10 @@ def bake_contact_gait(root, arma, targets, bvh):
     return []
 
 
-def evaluate_contacts(gait, frames):
+def evaluate_contacts(gait, frames, bvh=None):
     """Check evaluated IK endpoints, independently of the authored target arrays."""
     import bpy
+    from mathutils import Vector
     scene = bpy.context.scene
     arma = bpy.data.objects[gait["armature"]]
     samples = {foot["bone"]: [] for foot in gait["feet"]}
@@ -308,21 +317,28 @@ def evaluate_contacts(gait, frames):
         for foot in gait["feet"]:
             position = evaluated.matrix_world @ evaluated.pose.bones[foot["bone"]].tail
             samples[foot["bone"]].append(list(position))
-    errors, slips, vertical_errors = [], [], []
+    errors, slips, vertical_errors, heights = [], [], [], []
     for foot in gait["feet"]:
         actual = np.asarray(samples[foot["bone"]])
         stance = np.asarray(foot["stance"])
         errors.extend(np.linalg.norm(actual - foot["target_world"], axis=1)[stance].tolist())
         vertical_errors.extend((actual[:, 2] - np.asarray(foot["target_world"])[:, 2])[stance].tolist())
+        if bvh is not None:
+            for p in actual[stance]:
+                hit, *_ = bvh.ray_cast(Vector((p[0], p[1], p[2] + 5)), Vector((0, 0, -1)))
+                if hit is None:
+                    raise ValueError("evaluated stance foot misses rendered terrain")
+                heights.append(abs(float(p[2] - hit.z)))
         stable = stance[1:] & stance[:-1] & (np.diff(foot["cycles"]) == 0)
         slips.extend(np.linalg.norm(np.diff(actual, axis=0), axis=1)[stable].tolist())
     return dict(endpoint_target_error_p95_m=float(np.percentile(errors, 95)) if errors else None,
                 stance_step_slip_p95_m=float(np.percentile(slips, 95)) if slips else None,
                 positive_vertical_error_max_m=max(0., max(vertical_errors, default=0.)),
+                terrain_height_error_p95_m=float(np.percentile(heights, 95)) if heights else None,
                 stance_samples=len(errors), stable_steps=len(slips), frames_checked=len(frames))
 
 
-def fit_contact_height(root, gait, frames):
+def fit_contact_height(root, gait, frames, bvh=None):
     """Lower a terrain-centred body enough for its downslope stance feet to reach.
 
     Placeholder height is sampled under the body centre. On slopes, straight
@@ -340,10 +356,11 @@ def fit_contact_height(root, gait, frames):
     displacement = Vector((0, 0, -drop))
     if root.parent is not None:
         displacement = root.parent.matrix_world.to_3x3().inverted() @ displacement
+    root["p4d_contact_original_location"] = list(root.location)
     root.location += displacement
     root["p4d_contact_height_fitted"] = True
     gait["body_height_lowering_m"] = float(drop)
-    gait["evaluated_contacts"] = evaluate_contacts(gait, frames)
+    gait["evaluated_contacts"] = evaluate_contacts(gait, frames, bvh=bvh)
     return gait
 
 
