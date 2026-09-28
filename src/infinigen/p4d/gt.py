@@ -205,6 +205,32 @@ def local_mesh(o_eval):
     return co.reshape(-1, 3), tri.reshape(-1, 3)
 
 
+def stabilize_triangulation(objects):
+    """Triangulate the rest surface before deformation, identically for RGB and GT.
+
+    Blender's implicit tessellation can switch a quad diagonal or an n-gon ear
+    during deformation even when polygon connectivity remains unchanged. A
+    modifier before the armature or wind freezes that decision on the rest mesh.
+    The tracker still checks every evaluated triangle on every frame.
+    """
+    changed = []
+    for obj in objects:
+        if obj.type != "MESH" or object_kind(obj) not in ("creature", "wind"):
+            continue
+        deformation = next((i for i, m in enumerate(obj.modifiers)
+                            if m.type == "ARMATURE" or m.name == "p4d_wind"), None)
+        if deformation is None or obj.modifiers.get("p4d_rest_triangulation"):
+            continue
+        modifier = obj.modifiers.new("p4d_rest_triangulation", "TRIANGULATE")
+        modifier.quad_method = "FIXED"
+        modifier.ngon_method = "CLIP"
+        if hasattr(modifier, "keep_custom_normals"):
+            modifier.keep_custom_normals = True
+        obj.modifiers.move(len(obj.modifiers) - 1, deformation)
+        changed.append(obj.name)
+    return changed
+
+
 def tri_areas(co, tri):
     return 0.5 * np.linalg.norm(np.cross(co[tri[:, 1]] - co[tri[:, 0]], co[tri[:, 2]] - co[tri[:, 0]]), axis=1)
 
@@ -625,6 +651,9 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
     par = _collection_parents()
     rend = [o for o in s.objects if o.type in ("MESH", "CURVE", "CURVES", "FONT", "META", "VOLUME", "POINTCLOUD")
             and renderable(o, par)]
+    # Instance source templates may live in hidden collections while their
+    # instances render; apply the same rest-surface treatment to those sources.
+    triangulated = stabilize_triangulation(bpy.data.objects)
     table = assign_pass_indices(rend)
     kinds = {pi: d["kind"] for pi, d in table.items()}
     # instancers of dynamic instances: particle emitters + wind-swayed scatters / trees with GN instances
@@ -726,6 +755,7 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
                 tracks=dict(n=int(len(pidx)), by_source={str(k): int((src == k).sum()) for k in range(4)},
                             by_kind=counts, report=tracker.report),
                 render=dict(samples=samples, device=dev, device_type=devtype, n_renderable_objects=len(rend),
+                            rest_triangulated_objects=triangulated,
                             n_viewport_unhidden=n_vis, adaptive_threshold=s.cycles.adaptive_threshold,
                             view_transform=s.view_settings.view_transform, exposure=s.view_settings.exposure,
                             cycles_film_exposure=s.cycles.film_exposure, motion_blur=False, depth_of_field=False,
