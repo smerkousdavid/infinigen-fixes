@@ -12,14 +12,24 @@ def reaim_creature_high(compact=False, seed=0):
     trajectories. Geometry, actor motion, medium and low cameras are untouched.
     """
     import bpy
-    from infinigen.core.placement.camera import get_camera_rigs
-    from infinigen.p4d import cameras as C
     from infinigen.p4d.motion.creatures import actor_bounds
     scene = bpy.context.scene
     frames = list(range(scene.frame_start, scene.frame_end + 1))
     roots = [o for o in scene.objects if o.get('p4d_gait_report')]
     bounds = actor_bounds(roots, frames)
     target = np.mean([value.mean(1) for value in bounds.values()], axis=0)
+    return reaim_high_cameras(target, compact=compact, seed=seed,
+                              aim='evaluated creature group centre')
+
+
+def reaim_high_cameras(target, compact=False, seed=0, aim='shared scene target'):
+    """Re-author only the high rig around an explicit per-frame world target."""
+    import bpy
+    from infinigen.core.placement.camera import get_camera_rigs
+    from infinigen.p4d import cameras as C
+    scene = bpy.context.scene
+    frames = list(range(scene.frame_start, scene.frame_end + 1))
+    target = C._target_at(target, len(frames))
     rigs = get_camera_rigs()
     selected = [r for r in rigs if json.loads(r['p4d_view']).get('overlap_target') == 'high']
     if len(selected) != 4:
@@ -51,7 +61,8 @@ def reaim_creature_high(compact=False, seed=0):
             anchor = matrices[0, 0, :3, 3] + rng.normal(0, .015, 3)
             scale = float(np.linalg.norm(target[0] - anchor))
             base_pos, base_R, params = C.PATHS[path_type](rng, len(frames), anchor, target, scale,
-                fps=scene.render.fps / scene.render.fps_base, track_target=True,
+                fps=scene.render.fps / scene.render.fps_base, track_target=np.ptp(target, axis=0).max() > .01,
+                yaw_sweep_deg=2., pitch_amp_deg=.1,
                 dz=.08, drift_scale=.002, frac=.01, side_scale=.001, speed=.01, look_noise_deg=.1)
             meta.update(path_type=path_type, params=params, compact_high_seed=path_seed)
         if jitter:
@@ -67,11 +78,11 @@ def reaim_creature_high(compact=False, seed=0):
             raise ValueError('compact high path has inadequate terrain clearance')
         C.blender_apply_path(rig, pos, R, frame_start=frames[0])
         record = dict(camera=cam.name, previous_path_type=previous_type,
-                      aim='evaluated creature group centre', translation_unchanged=not compact,
+                      aim=aim, translation_unchanged=not compact,
                       compact=compact)
         if meta['path_type'] == 'static':
             meta['path_type'] = 'spin'
-        meta['params']['aim'] = 'evaluated creature group centre'
+        meta['params']['aim'] = aim
         meta['high_reaim'] = record
         meta['target_world'] = target.tolist()
         rig['p4d_view'] = json.dumps(meta)

@@ -90,6 +90,9 @@ its translations and authored jitter; check its rendered overlap before reuse.
 tracking pan, crane, dolly and handheld walk, retaining the authored jitter.
 This avoids a long following-camera translation pulling dense vegetation views
 out of the high-overlap range. Actor geometry and motion remain unchanged.
+For an already remeshed wind scene, `prepare_wind --compact-high` adjusts only
+the high rig near its current anchor and retains the fine geometry. Review its
+sparse rendered overlap and images before running the full tier.
 
 ## Overlap curriculum
 

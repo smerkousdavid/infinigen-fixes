@@ -13,7 +13,7 @@ from infinigen.p4d.runtime import configure_cpu_budget, source_identity
 configure_cpu_budget()
 
 
-def run(source, out):
+def run(source, out, compact_high=False):
     import bpy
     from mathutils import Vector
     from infinigen.core.placement.camera import get_camera_rigs
@@ -35,6 +35,24 @@ def run(source, out):
     bpy.ops.wm.open_mainfile(filepath=str(blend))
     gt.unhide_renderables()
     scene = bpy.context.scene
+    if compact_high:
+        from infinigen.p4d.terrain_cameras import reaim_high_cameras
+        high = [json.loads(r['p4d_view']) for r in get_camera_rigs()
+                if json.loads(r['p4d_view']).get('overlap_target') == 'high']
+        if len(high) != 4 or 'target_world' not in high[0]:
+            raise ValueError('compact high requires a saved vegetation target')
+        report = reaim_high_cameras(np.asarray(high[0]['target_world']), compact=True,
+                                   seed=config['seed'], aim='populated vegetation')
+        bpy.ops.wm.save_as_mainfile(filepath=str(blend))
+        report.update(source=str(source), input_sha256=before,
+                      output_sha256=hashlib.sha256(blend.read_bytes()).hexdigest(),
+                      source_identity=source_identity(), seconds=time.time()-start,
+                      geometry_unchanged=True, medium_low_unchanged=True)
+        stages['stages']['fine_terrain']['camera_high_postprocess'] = report
+        (out / 'run.json').write_text(json.dumps(stages, indent=2))
+        (out / 'preparation.json').write_text(json.dumps(report, indent=2))
+        print(json.dumps(report), flush=True)
+        return
     scene.frame_set(scene.frame_start)
     dg = bpy.context.evaluated_depsgraph_get()
     trees = [o for o in scene.objects if 'TreeFactory' in o.name and 'spawn_asset' in o.name
@@ -147,7 +165,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--compact-high', action='store_true',
+                        help='adjust only the high rig locally, retaining the current fine geometry')
     args = parser.parse_args()
-    run(args.source, args.out)
+    run(args.source, args.out, args.compact_high)
     sys.stdout.flush()
     os._exit(0)
