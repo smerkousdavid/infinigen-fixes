@@ -72,7 +72,8 @@ def sample_rig(rng, T, fps, intrinsics, anchor_fn, target, tier, clearance_fn, r
                     anchor = anchor0
                 dist = max(1., np.linalg.norm(anchor - tgt[0]))
                 kwargs = dict(dz=.08 if tier == "high" else .25,
-                              track_target=tier == 'high',
+                              track_target=tier == 'high' and np.ptp(tgt, axis=0).max() > .01,
+                              pitch_amp_deg=.5 if tier == 'high' else float(rng.uniform(0, 10)),
                               drift_scale=.01 if tier == 'high' else .1,
                               side_scale=.01 if tier == 'high' else .1,
                               frac=.04 if tier == "high" else .12,
