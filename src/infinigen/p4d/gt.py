@@ -615,7 +615,25 @@ from infinigen.p4d.runtime import source_identity
 SOURCE_IDENTITY = source_identity()
 
 
-def clearance_report(objects, cameras, frames):
+def clearance_candidates(objects, points, upper_bounds, depsgraph):
+    """Objects whose evaluated world bounds can improve an exact nearest distance."""
+    candidates = []
+    for obj in objects:
+        evaluated = obj.evaluated_get(depsgraph)
+        bounds = np.asarray(evaluated.bound_box, dtype=np.float64)
+        if not np.isfinite(bounds).all() or np.all(bounds == -1):
+            candidates.append(obj)  # unavailable bounds are never culled
+            continue
+        matrix = np.asarray(evaluated.matrix_world)
+        bounds = bounds @ matrix[:3, :3].T + matrix[:3, 3]
+        outside = np.maximum(np.maximum(bounds.min(0) - points, points - bounds.max(0)), 0)
+        lower = np.linalg.norm(outside, axis=1)
+        if np.any(lower <= upper_bounds + 1e-5):
+            candidates.append(obj)
+    return candidates
+
+
+def clearance_report(objects, cameras, frames, *, broadphase=True):
     """Check every evaluated camera frame against static and moving mesh geometry."""
     import bpy
     from infinigen.p4d.cameras import blender_bvh_callbacks
@@ -626,18 +644,23 @@ def clearance_report(objects, cameras, frames):
     moving = [o for o in objects if o.type == "MESH" and object_kind(o) != "static"]
     static_clear, _, _ = blender_bvh_callbacks(static)
     result = np.full((len(frames), len(cameras)), np.inf)
+    candidate_counts = []
     for t, frame in enumerate(frames):
         scene.frame_set(frame)
         dg = bpy.context.evaluated_depsgraph_get()
         p = np.array([c.evaluated_get(dg).matrix_world.translation[:] for c in cameras])
         result[t] = static_clear(p)
-        if moving:
-            dynamic_clear, _, _ = blender_bvh_callbacks(moving, dg)
+        candidates = clearance_candidates(moving, p, result[t], dg) if broadphase else moving
+        candidate_counts.append(len(candidates))
+        if candidates:
+            dynamic_clear, _, _ = blender_bvh_callbacks(candidates, dg)
             result[t] = np.minimum(result[t], dynamic_clear(p))
     if np.any(result < .3):
         t, v = np.unravel_index(np.argmin(result), result.shape)
         raise ValueError(f"camera {v} violates 0.3m clearance at frame {frames[t]}: {result[t, v]:.4f}m")
     return dict(min_per_view_m=result.min(0).tolist(), frames_checked=len(frames),
+                per_frame_m=result.tolist(), moving_objects=len(moving),
+                candidate_objects_per_frame=candidate_counts, bounds_filter=bool(broadphase),
                 geometry="evaluated mesh objects; rendered depth additionally checks visible instances")
 
 
