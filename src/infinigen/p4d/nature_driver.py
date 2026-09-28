@@ -98,6 +98,10 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
         loc, *_ = (tbvh or bvh).ray_cast(Vector((x, y, 1e4)), Vector((0, 0, -1)))
         return None if loc is None else loc.z
 
+    def above_ground(points):
+        heights = [ground_z(*p[:2]) for p in points]
+        return np.array([z is not None and p[2] - z >= .3 for p, z in zip(points, heights)])
+
     anchors = []
     for v in base_views:
         _, prop, _ = v
@@ -181,7 +185,8 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
                     tier_targets.append(region)
                     target_names.append(name)
             sampled = sample_rig(rng, T, fps, intrs, anchor_fn, target, tier, clearance_fn, ray_fn,
-                                 view_targets=tier_targets, max_tries=400 if tier == "low" else 160)
+                                 inside_fn=above_ground, view_targets=tier_targets,
+                                 max_tries=400 if tier == "low" else 160)
             for i, (rig, view) in enumerate(zip(rigs, sampled)):
                 C.blender_apply_path(rig, view["pos"], view["R"], frame_start=fs)
                 meta = dict(view["meta"], view_id=i, seed=int(P4D["seed"] * 100 + k * 4 + i),

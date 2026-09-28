@@ -686,7 +686,7 @@ def bounded_mesh_clearance(objects, points, upper_bounds, depsgraph):
     return result
 
 
-def clearance_report(objects, cameras, frames, *, broadphase=True):
+def clearance_report(objects, cameras, frames, *, broadphase=True, terrain=None):
     """Check every evaluated camera frame against static and moving mesh geometry."""
     import bpy
     from infinigen.p4d.cameras import blender_bvh_callbacks
@@ -698,10 +698,17 @@ def clearance_report(objects, cameras, frames, *, broadphase=True):
     static_clear, _, _ = blender_bvh_callbacks(static)
     result = np.full((len(frames), len(cameras)), np.inf)
     candidate_counts = []
+    terrain_heights = []
     for t, frame in enumerate(frames):
         scene.frame_set(frame)
         dg = bpy.context.evaluated_depsgraph_get()
         p = np.array([c.evaluated_get(dg).matrix_world.translation[:] for c in cameras])
+        if terrain is not None:
+            from infinigen.p4d.terrain_cameras import heights_above_terrain
+            heights = heights_above_terrain(p, terrain)
+            if np.any(heights < .3):
+                raise ValueError(f"camera below final terrain clearance at frame {frame}: {heights.tolist()}")
+            terrain_heights.append(heights)
         result[t] = static_clear(p)
         candidates = clearance_candidates(moving, p, result[t], dg) if broadphase else moving
         candidate_counts.append(len(candidates))
@@ -715,6 +722,7 @@ def clearance_report(objects, cameras, frames, *, broadphase=True):
         t, v = np.unravel_index(np.argmin(result), result.shape)
         raise ValueError(f"camera {v} violates 0.3m clearance at frame {frames[t]}: {result[t, v]:.4f}m")
     return dict(min_per_view_m=result.min(0).tolist(), frames_checked=len(frames),
+                min_height_above_terrain_m=np.min(terrain_heights, axis=0).tolist() if terrain_heights else None,
                 per_frame_m=result.tolist(), moving_objects=len(moving),
                 candidate_objects_per_frame=candidate_counts, bounds_filter=bool(broadphase),
                 geometry="evaluated mesh objects; rendered depth additionally checks visible instances")
@@ -760,7 +768,13 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
     dyn = [o for o in rend if o.type == "MESH" and kinds[o.pass_index] in DYNAMIC_KINDS
            and not (o.particle_systems and len(o.particle_systems))]
     logger.info("p4d clearance: %d renderable objects, %d frames", len(rend), T)
-    geometry_checks = clearance_report(rend, cameras, frames)
+    terrain = None
+    if family.startswith('nature'):
+        from infinigen.p4d.motion.creatures import terrain_bvh
+        terrain = terrain_bvh(render_only=True)
+        if terrain is None:
+            raise ValueError('nature scene has no rendered terrain for camera height checks')
+    geometry_checks = clearance_report(rend, cameras, frames, terrain=terrain)
     logger.info("p4d clearance passed; preparing tracks on %d meshes and %d instancers", len(dyn), len(instancers))
     s.frame_set(fs)
     t1 = time.time()

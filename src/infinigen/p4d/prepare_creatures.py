@@ -31,16 +31,20 @@ def run(source, out):
     gt.unhide_renderables()
     gt.stabilize_triangulation(bpy.data.objects)
     report = prepare_scene_contacts()
+    from infinigen.p4d.terrain_cameras import repair_creature_cameras
+    report['camera_terrain'] = repair_creature_cameras()
     report["gaits"] = {obj.name: json.loads(obj["p4d_gait_report"]) for obj in bpy.context.scene.objects
                        if obj.get("p4d_gait_report")}
     bpy.context.scene["p4d_motion_preparation"] = json.dumps(source_identity())
     bpy.ops.wm.save_as_mainfile(filepath=str(blend))
     report.update(source=str(source), input_sha256=before, output_sha256=hashlib.sha256(blend.read_bytes()).hexdigest(),
                   source_identity=source_identity(), seconds=time.time()-start)
+    if stages['stages']['fine_terrain'].get('motion_postprocess'):
+        report['previous_motion_postprocess'] = stages['stages']['fine_terrain']['motion_postprocess']
     stages["stages"]["fine_terrain"]["motion_postprocess"] = report
     (out / "run.json").write_text(json.dumps(stages, indent=2))
     (out / "preparation.json").write_text(json.dumps(report, indent=2))
-    print(json.dumps({k: report[k] for k in ("actor_separation", "actor_clearance", "seconds")}), flush=True)
+    print(json.dumps({k: report[k] for k in ("actor_separation", "actor_clearance", "camera_terrain", "seconds")}), flush=True)
 
 
 if __name__ == "__main__":
