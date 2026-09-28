@@ -8,9 +8,8 @@
 plan.txt: one "family seed" per line. Up to --jobs scenes run concurrently (the v1 nature stages are CPU bound and
 single threaded, so several scenes overlap well; renders share the GPU). After each scene:
   1. QA: the p4d-1.1 converter + validator from point4d-datasets (convert/infinigen.py) must pass;
-  2. the raw scene dir is packed to <out>/ready/<scene>.tar for transfer, and v1 intermediates (coarse/fine/frames,
-     several GB) are deleted.
-Progress/timings: <out>/batch.jsonl (one record per scene). Re-running skips scenes already in ready/ or failed/.
+  2. retain validated compressed clips in ready/, with SHA256 manifests; preserve raw until transfer verification.
+Progress/timings: <out>/batch.jsonl (one record per scene). Re-running verifies completed clips and retries failed scenes.
 """
 
 from __future__ import annotations
@@ -28,58 +27,64 @@ from pathlib import Path
 
 
 def run_one(fam, seed, a):
+    import hashlib
+    from infinigen.p4d.qa import check
+
     name = f"{fam}_s{seed:05d}"
     work = a.out / "work" / name
-    ready = a.out / "ready" / f"{name}.tar"
-    if ready.exists() or (a.out / "failed" / f"{name}.json").exists():
-        return None
+    ready = a.out / "ready"
+    ready.mkdir(parents=True, exist_ok=True)
+    complete = ready / f"{name}.complete.json"
+    if complete.exists():
+        previous = json.loads(complete.read_text())
+        if all((ready / c["file"]).exists() and hashlib.sha256((ready / c["file"]).read_bytes()).hexdigest() == c["sha256"]
+               for c in previous["clips"]):
+            return previous
+        raise ValueError(f"completed scene has missing/corrupted converted clips: {name}")
     work.mkdir(parents=True, exist_ok=True)
-    rec = dict(scene=name, family=fam, seed=seed, start=time.time())
+    rec = dict(scene=name, family=fam, seed=seed, start=time.time(), clips=[])
     cmd = [sys.executable, "-m", "infinigen.p4d.run_scene", "--family", fam, "--seed", str(seed), "--out", str(work),
            "--frames", str(a.frames), "--width", str(a.width), "--height", str(a.height), "--views", str(a.views),
-           "--samples", str(a.samples)]
-    t0 = time.time()
-    with open(work / "run_scene.log", "w") as log:
+           "--fps", str(a.fps), "--samples", str(a.samples), "--overlap", a.overlap]
+    if a.resume and (work / "resolved_config.json").exists():
+        cmd.append("--resume")
+    with open(work / "run_scene.log", "a") as log:
         r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=str(a.src))
-    rec["generate_s"] = round(time.time() - t0, 1)
-    raw = work / name
-    if r.returncode != 0 or not (raw / "scene_meta.json").exists():
+    rec["generate_s"] = round(time.time() - rec["start"], 1)
+    raws = sorted(p.parent for p in work.glob(name + "*/scene_meta.json"))
+    if r.returncode != 0 or len(raws) != (3 if a.overlap == "all" else 1):
         rec.update(status="generate_failed", exit=r.returncode,
                    log_tail=(work / "run_scene.log").read_text(errors="ignore")[-3000:])
         return _fail(a, name, rec)
-    # QA conversion (validator) on the pod
-    t1 = time.time()
     qa = a.out / "qa"
     qa.mkdir(exist_ok=True)
     env = dict(os.environ, PYTHONPATH=str(a.p4d_repo / "stream"))
-    q = subprocess.run([sys.executable, str(a.p4d_repo / "convert/infinigen.py"), str(raw), "--out", str(qa)],
-                       capture_output=True, text=True, env=env)
-    rec["qa_s"] = round(time.time() - t1, 1)
-    qjson = next(iter(qa.glob(f"*{name}.quality.json")), None)
-    if q.returncode != 0 or qjson is None:
-        rec.update(status="qa_failed", qa_tail=(q.stdout + q.stderr)[-3000:])
-        return _fail(a, name, rec)
-    qual = json.loads(qjson.read_text())["quality"]
-    rec["quality"] = {k: qual.get(k) for k in ("reprojection_agree_mean", "reprojection_agree_min_view",
-                                                "cross_view_agree", "n_tracks", "tracks_per_kind", "flow_convention",
-                                                "flow_dropped", "validated")}
-    for t in qa.glob(f"*{name}.tar"):  # QA clip not needed on the pod (the pipeline rebuilds it from raw)
-        t.unlink()
-    meta = json.loads((raw / "scene_meta.json").read_text())
-    rec["timing"] = meta.get("timing")
-    rec["tracks"] = {k: meta["tracks"][k] for k in ("n", "by_source", "by_kind")}
-    rec["views"] = [dict(path_type=v.get("path_type"), jitter=v.get("jitter"), fallback=v.get("fallback", False))
-                    for v in meta.get("views", [])]
-    rec["motion_keys"] = sorted(meta.get("motion", {}))
-    t2 = time.time()
-    (a.out / "ready").mkdir(exist_ok=True)
-    with tarfile.open(str(ready) + ".partial", "w") as tar:
-        tar.add(raw, arcname=name)
-    os.replace(str(ready) + ".partial", ready)
-    rec["pack_s"] = round(time.time() - t2, 1)
-    rec["ready_bytes"] = ready.stat().st_size
-    shutil.rmtree(work, ignore_errors=True)
+    for raw in raws:
+        meta = json.loads((raw / "scene_meta.json").read_text())
+        meta["split"] = a.split
+        (raw / "scene_meta.json").write_text(json.dumps(meta, indent=1))
+        report = qa / f"{raw.name}.conversion.json"
+        q = subprocess.run([sys.executable, str(a.p4d_repo / "convert/infinigen.py"), str(raw), "--out", str(qa),
+                            "--report", str(report)],
+                           capture_output=True, text=True, env=env)
+        (qa / f"{raw.name}.conversion.log").write_text(q.stdout + q.stderr)
+        clips = list(qa.glob(f"*__{raw.name}.tar"))
+        if q.returncode != 0 or len(clips) != 1:
+            rec.update(status="qa_failed", qa_tail=(q.stdout + q.stderr)[-3000:])
+            return _fail(a, name, rec)
+        gates = check(raw, clips[0], expected_frames=a.frames, expected_size=(a.width, a.height), expected_fps=a.fps)
+        (qa / f"{raw.name}.gates.json").write_text(json.dumps(gates, indent=2))
+        if not gates["PASS"]:
+            rec.update(status="gates_failed", failures=gates["failures"])
+            return _fail(a, name, rec)
+        target = ready / clips[0].name
+        os.replace(clips[0], target)
+        rec["clips"].append(dict(file=target.name, sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+                                  bytes=target.stat().st_size, raw=str(raw), overlap=gates["overlap"],
+                                  row=json.loads(report.read_text())["row"]))
+    # Raw data and diagnostic logs remain until a verified-transfer receipt exists.
     rec.update(status="ok", end=time.time(), wall_s=round(time.time() - rec["start"], 1))
+    complete.write_text(json.dumps(rec, indent=2))
     _log(a, rec)
     return rec
 
@@ -102,10 +107,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--jobs", type=int, default=3)
+    ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--p4d_repo", type=Path, default=Path("/root/point4d-datasets"))
     ap.add_argument("--src", type=Path, default=Path("/root/infinigen"))
-    ap.add_argument("--frames", type=int, default=48)
+    ap.add_argument("--frames", type=int, default=96)
+    ap.add_argument("--fps", type=int, default=24)
+    ap.add_argument("--split", default="pilot_v02")
+    ap.add_argument("--overlap", choices=("all", "high", "medium", "low"), default="all")
+    ap.add_argument("--resume", action="store_true")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--views", type=int, default=4)
@@ -114,7 +123,9 @@ def main():
     a.out.mkdir(parents=True, exist_ok=True)
     plan = [ln.split() for ln in a.plan.read_text().splitlines() if ln.strip() and not ln.startswith("#")]
     with ThreadPoolExecutor(a.jobs) as ex:
-        list(ex.map(lambda fs: run_one(fs[0], int(fs[1]), a), plan))
+        results = list(ex.map(lambda fs: run_one(fs[0], int(fs[1]), a), plan))
+    if any(r is None or r.get("status") != "ok" for r in results):
+        raise SystemExit("batch contains failed scenes; inspect batch.jsonl")
     print("BATCH_DONE", flush=True)
 
 

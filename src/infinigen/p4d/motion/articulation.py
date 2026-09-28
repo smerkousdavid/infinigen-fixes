@@ -29,20 +29,19 @@ logger = logging.getLogger(__name__)
 
 PROFILES = ("open", "close", "partial", "open_close", "repeated")
 # (asset, weight): floor-standing, human-scale assets first (small countertop ones are hard to see on the floor)
-DEFAULT_ASSETS = {"cabinet": 3, "drawer": 3, "dishwasher": 2, "refrigerator": 2, "door": 1, "oven": 1,
-                  "microwave": 0.5, "toaster": 0.3}
+DEFAULT_ASSETS = {"cabinet": 1, "drawer": 1}
 
 
-def _walk(tree, seen, out):
+def _walk(tree, seen, out, parents=()):
     if tree is None or tree.name in seen:
         return
-    seen.add(tree.name)
+    seen = seen | {tree.name}
     for n in tree.nodes:
         if n.type == "GROUP" and n.node_tree is not None:
             nm = n.node_tree.name.lower().replace(" ", "").replace("_", "")
             if ("hingejoint" in nm or "slidingjoint" in nm) and "Value" in n.inputs:
-                out.append((tree, n))
-            _walk(n.node_tree, seen, out)
+                out.append((tree, n, parents))
+            _walk(n.node_tree, seen, out, parents + ((tree, n),))
 
 
 class _Driver:
@@ -63,7 +62,7 @@ class _Driver:
             self.target.keyframe_insert(f'["{self.key}"]', frame=frame)
 
 
-def _resolve(tree, sock, mod, top_tree, depth=0):
+def _resolve(tree, sock, mod, top_tree, depth=0, parents=()):
     """Follow a linked input upstream through reroutes to something we can animate."""
     if not sock.is_linked:
         return _Driver("socket", sock)
@@ -72,7 +71,7 @@ def _resolve(tree, sock, mod, top_tree, depth=0):
     link = sock.links[0]
     node = link.from_node
     if node.type == "REROUTE":
-        return _resolve(tree, node.inputs[0], mod, top_tree, depth + 1)
+        return _resolve(tree, node.inputs[0], mod, top_tree, depth + 1, parents)
     if node.type == "VALUE":
         return _Driver("value_node", node)
     if node.type == "GROUP_INPUT" and tree is top_tree:
@@ -80,7 +79,65 @@ def _resolve(tree, sock, mod, top_tree, depth=0):
         for item in tree.interface.items_tree:
             if item.in_out == "INPUT" and item.name == name:
                 return _Driver("modifier", mod, item.identifier)
+    if node.type == "GROUP_INPUT" and parents:
+        outer_tree, group = parents[-1]
+        return _resolve(outer_tree, group.inputs[link.from_socket.name], mod, top_tree, depth + 1, parents[:-1])
+    if node.type == "GROUP" and node.node_tree is not None:
+        output = next((n for n in node.node_tree.nodes if n.type == "GROUP_OUTPUT" and n.is_active_output), None)
+        if output is not None:
+            return _resolve(node.node_tree, output.inputs[link.from_socket.name], mod, top_tree,
+                            depth + 1, parents + ((tree, node),))
     return None
+
+
+def _value(tree, socket, modifier, top_tree, parents, depth=0):
+    if socket is None:
+        raise ValueError("joint is missing its declared limit")
+    if depth > 24:
+        raise ValueError("cyclic joint limit expression")
+    if not socket.is_linked:
+        return np.asarray(socket.default_value, dtype=float)
+    link = socket.links[0]
+    node = link.from_node
+    if node.type == "REROUTE":
+        return _value(tree, node.inputs[0], modifier, top_tree, parents, depth + 1)
+    if node.type == "VALUE":
+        return float(node.outputs[0].default_value)
+    if node.type == "GROUP_INPUT":
+        if parents:
+            outer, group = parents[-1]
+            return _value(outer, group.inputs[link.from_socket.name], modifier, top_tree, parents[:-1], depth + 1)
+        for item in tree.interface.items_tree:
+            if item.in_out == "INPUT" and item.name == link.from_socket.name:
+                return np.asarray(modifier.get(item.identifier, item.default_value), dtype=float)
+    if node.type == "SEPXYZ":
+        vector = _value(tree, node.inputs[0], modifier, top_tree, parents, depth + 1)
+        return float(vector["XYZ".index(link.from_socket.name)])
+    if node.type == "GROUP":
+        output = next((n for n in node.node_tree.nodes if n.type == "GROUP_OUTPUT" and n.is_active_output), None)
+        if output is not None:
+            return _value(node.node_tree, output.inputs[link.from_socket.name], modifier, top_tree,
+                           parents + ((tree, node),), depth + 1)
+    if socket.is_linked and socket.links[0].from_node.type == "MATH":
+        node = socket.links[0].from_node
+        values = [_value(tree, s, modifier, top_tree, parents, depth + 1) for s in node.inputs[:2]]
+        a, b = values
+        ops = {"ADD": lambda: a + b, "SUBTRACT": lambda: a - b, "MULTIPLY": lambda: a * b,
+               "DIVIDE": lambda: a / b if b else 0., "MINIMUM": lambda: min(a, b),
+               "MAXIMUM": lambda: max(a, b), "ABSOLUTE": lambda: abs(a), "MULTIPLY_ADD": lambda:
+               a * b + _value(tree, node.inputs[2], modifier, top_tree, parents, depth + 1)}
+        if node.operation not in ops:
+            raise ValueError(f"unsupported joint limit operation {node.operation}")
+        result = ops[node.operation]()
+        return float(np.clip(result, 0, 1) if node.use_clamp else result)
+    d = _resolve(tree, socket, modifier, top_tree, parents=parents)
+    if d is None:
+        raise ValueError(f"cannot resolve linked joint limit {tree.name}/{socket.name}")
+    if d.kind == "modifier":
+        return float(d.target[d.key])
+    if d.kind == "value_node":
+        return float(d.target.outputs[0].default_value)
+    return float(d.target.default_value)
 
 
 def find_joints(obj):
@@ -92,14 +149,16 @@ def find_joints(obj):
         found = []
         _walk(m.node_group, set(), found)
         seen = set()
-        for t, n in found:
-            d = _resolve(t, n.inputs["Value"], m, m.node_group)
+        for t, n, parents in found:
+            d = _resolve(t, n.inputs["Value"], m, m.node_group, parents=parents)
             if d is None:
                 continue
             key = (d.kind, id(d.target), d.key) if d.kind != "socket" else ("socket", t.name, n.name)
             if key in seen:  # several joints fed by one value (e.g. duplicated doors) animate together
                 continue
             seen.add(key)
+            d.limits = (float(_value(t, n.inputs.get("Min"), m, m.node_group, parents)),
+                        float(_value(t, n.inputs.get("Max"), m, m.node_group, parents)))
             out.append((t, n, d))
     return out
 
@@ -126,24 +185,30 @@ def profile_curve(rng, profile, T):
     raise ValueError(profile)
 
 
-def animate_joints(rng, obj, frame_start, T, profiles=None):
+def animate_joints(rng, obj, frame_start, T, profiles=None, fps=24):
     joints = []
     for tree, n, drv in find_joints(obj):
         kind = "hinge" if "hinge" in n.node_tree.name.lower() else "slide"
-        lo = n.inputs["Min"].default_value if "Min" in n.inputs and not n.inputs["Min"].is_linked else 0.0
-        hi = n.inputs["Max"].default_value if "Max" in n.inputs and not n.inputs["Max"].is_linked else 0.0
+        lo, hi = drv.limits
         if lo == 0.0 and hi == 0.0:
             hi = 1.3 if kind == "hinge" else 0.3
         amax = float(lo + rng.uniform(0.6, 0.9) * (hi - lo))
         prof = str(rng.choice(profiles or PROFILES))
         s = profile_curve(rng, prof, T)
+        # Cap opening velocity while respecting the authored profile and limits.
+        q = lo + (amax - lo) * s
+        speed_limit = 1.5 if kind == "hinge" else .4
+        for i in range(1, T):
+            q[i] = np.clip(q[i], q[i-1] - speed_limit / fps, q[i-1] + speed_limit / fps)
         for t in range(T):
-            drv.set(float(lo + (amax - lo) * s[t]), frame_start + t)
+            drv.set(float(q[t]), frame_start + t)
         label = n.inputs["Joint Label"].default_value if "Joint Label" in n.inputs and \
             not n.inputs["Joint Label"].is_linked else ""
         joints.append(dict(tree=tree.name, node=n.name, kind=kind, label=label, driver=drv.kind, min=float(lo),
                            max=float(hi),
-                           amax=amax, profile=prof, s_range=[float(s.min()), float(s.max())]))
+                           amax=amax, profile=prof, s_range=[float(s.min()), float(s.max())],
+                           q=q.tolist(), units="rad" if kind == "hinge" else "m", fps=fps,
+                           actuation="scripted external actuation", speed_limit=speed_limit))
     return joints
 
 
@@ -189,14 +254,14 @@ def _overlaps(lo, hi, boxes, tol=0.01):
     return any(np.all(lo < b_hi - tol) and np.all(hi > b_lo + tol) for b_lo, b_hi in boxes)
 
 
-def _motion_box(obj, frame_start, T, n=3):
+def _motion_box(obj, frame_start, T, n=None):
     import bpy
 
     from infinigen.p4d.motion.objects import world_bbox
 
     s = bpy.context.scene
     lo, hi = world_bbox(obj)
-    for f in np.linspace(frame_start, frame_start + T - 1, n).astype(int):
+    for f in range(frame_start, frame_start + T):
         s.frame_set(int(f))
         a, b = world_bbox(obj)
         lo, hi = np.minimum(lo, a), np.maximum(hi, b)
@@ -204,7 +269,7 @@ def _motion_box(obj, frame_start, T, n=3):
     return lo, hi
 
 
-def place_against_wall(rng, obj, room_bbox, occupied, frame_start, T, max_tries=40, margin=0.05):
+def place_against_wall(rng, obj, room_bbox, occupied, frame_start, T, max_tries=200, margin=0.05):
     """Rotate so the front faces into the room; put it on the floor against a random wall (or, failing that, on a
     free floor spot facing the room centre); reject spots whose full-motion AABB overlaps existing furniture."""
     import bpy
@@ -216,12 +281,17 @@ def place_against_wall(rng, obj, room_bbox, occupied, frame_start, T, max_tries=
     fr = front_direction(obj, frame_start, frame_start + T - 1) if T > 1 else None
     s = bpy.context.scene
     s.frame_set(frame_start)
-    front_yaw = math.atan2(fr[1], fr[0]) if fr is not None else -math.pi / 2
+    # These assets author their fronts along +X. A hinge's mean displacement
+    # points diagonally across its arc and is not the cabinet's facing direction.
+    if obj.name.startswith(("sim_cabinet_", "sim_drawer_")):
+        front_yaw = float(obj.rotation_euler.z)
+    else:
+        front_yaw = math.atan2(fr[1], fr[0]) if fr is not None else -math.pi / 2
     walls = [(0, lo[0], 0.0), (0, hi[0], math.pi), (1, lo[1], math.pi / 2), (1, hi[1], -math.pi / 2)]
     reasons = {"no_span": 0, "static_overlap": 0, "motion_overlap": 0}
     wall_only = "door" in obj.name.lower() and "dishwasher" not in obj.name.lower()  # a free-standing door frame
     for attempt in range(max_tries):
-        free_floor = attempt >= max_tries // 2 and not wall_only
+        free_floor = False  # furniture must have a real wall/support relationship
         if free_floor:
             x, y = rng.uniform(lo[0] + 0.5, hi[0] - 0.5), rng.uniform(lo[1] + 0.5, hi[1] - 0.5)
             ctr_room = (lo + hi) / 2
@@ -265,38 +335,46 @@ def place_against_wall(rng, obj, room_bbox, occupied, frame_start, T, max_tries=
     return None
 
 
-def add_articulated(rng, room_bbox, occupied, frame_start, T, n=(2, 3), assets=DEFAULT_ASSETS, profiles=None):
+def add_articulated(rng, room_bbox, occupied, frame_start, T, n=(2, 2), assets=DEFAULT_ASSETS, profiles=None):
     """Spawn + animate + place n articulated assets. Returns (objects, summary)."""
     import bpy
 
     k = int(rng.integers(n[0], n[1] + 1))
     pool = dict(assets) if isinstance(assets, dict) else {a: 1.0 for a in assets}
+    unsupported = set(pool) - set(DEFAULT_ASSETS)
+    if unsupported:
+        raise ValueError(f"support/opening-aware room placement is not implemented for {sorted(unsupported)}")
+    if k > len(pool):
+        raise ValueError("requested more distinct articulated assets than the placement pool")
     keys = list(pool)
     p = np.array([pool[x] for x in keys], float)
     names = list(rng.choice(keys, size=k, replace=False, p=p / p.sum()))
     objs, summary = [], []
     for nm in names:
-        seed = int(rng.integers(0, 10**6))
-        try:
-            obj = spawn_asset(nm, seed)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"spawn {nm} failed: {e!r}")
-            summary.append(dict(asset=nm, seed=seed, error=repr(e)[:200]))
-            continue
-        joints = animate_joints(rng, obj, frame_start, T, profiles=profiles)
-        if not joints:
-            logger.warning(f"{nm}: no animatable joints; removed")
-            bpy.data.objects.remove(obj, do_unlink=True)
-            summary.append(dict(asset=nm, seed=seed, error="no joints"))
-            continue
-        place = place_against_wall(rng, obj, room_bbox, occupied, frame_start, T)
-        if place is None:
-            bpy.data.objects.remove(obj, do_unlink=True)
-            summary.append(dict(asset=nm, seed=seed, error="no free wall spot"))
-            continue
-        obj["p4d_kind"] = "articulated"
-        obj["p4d_class"] = f"articulated_{nm}"
-        objs.append(obj)
-        summary.append(dict(asset=nm, seed=seed, object=obj.name, joints=joints, placement=place))
-        logger.info(f"p4d articulated {obj.name}: {len(joints)} joints {[j['profile'] for j in joints]}")
+        for asset_attempt in range(8):
+            seed = int(rng.integers(0, 10**6))
+            try:
+                obj = spawn_asset(nm, seed)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"spawn {nm} failed: {e!r}")
+                summary.append(dict(asset=nm, seed=seed, error=repr(e)[:200]))
+                continue
+            joints = animate_joints(rng, obj, frame_start, T, profiles=profiles,
+                                     fps=bpy.context.scene.render.fps / bpy.context.scene.render.fps_base)
+            if not joints:
+                logger.warning(f"{nm}: no animatable joints; removed")
+                bpy.data.objects.remove(obj, do_unlink=True)
+                summary.append(dict(asset=nm, seed=seed, error="no joints"))
+                continue
+            place = place_against_wall(rng, obj, room_bbox, occupied, frame_start, T)
+            if place is None:
+                bpy.data.objects.remove(obj, do_unlink=True)
+                summary.append(dict(asset=nm, seed=seed, error="no free wall spot"))
+                continue
+            obj["p4d_kind"] = "articulated"
+            obj["p4d_class"] = f"articulated_{nm}"
+            objs.append(obj)
+            summary.append(dict(asset=nm, seed=seed, object=obj.name, joints=joints, placement=place))
+            logger.info(f"p4d articulated {obj.name}: {len(joints)} joints {[j['profile'] for j in joints]}")
+            break
     return objs, summary

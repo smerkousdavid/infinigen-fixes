@@ -165,3 +165,31 @@ def test_follow_does_not_flip_when_target_stops():
     pos, R, p = cams.path_follow(rng, T, np.array([-2.0, -1.0, 1.2]), tgt, 2.0, fps=FPS)
     step = np.linalg.norm(np.diff(pos, axis=0), axis=1)
     assert step.max() < 0.25, step.max()  # no jumps (> ~6 m/s)
+
+
+def test_projection_matrix_shifted_anisotropic():
+    P = np.array([[2., 0, .2, 0], [0, 3., -.3, 0], [0, 0, -1.01, -.1], [0, 0, -1., 0]])
+    intr = cams.Intrinsics.from_projection(P, 800, 600)
+    point_bl = np.array([1., .4, -5., 1.])
+    ndc = P @ point_bl
+    uv = np.array([(ndc[0] / ndc[3] + 1) * 400, (1 - ndc[1] / ndc[3]) * 300])
+    pc = point_bl[:3] * [1, -1, -1]
+    expected = intr.K() @ pc
+    assert np.allclose(uv, expected[:2] / expected[2])
+    assert intr.fx != intr.fy and intr.cx != 400 and intr.cy != 300
+
+
+def test_strict_invalid_path_raises_without_fallback():
+    cl, ray = ground_and_wall()
+    with pytest.raises(ValueError, match="no valid static camera"):
+        cams.sample_view(np.random.default_rng(3), T, FPS, INTR, anchor=[5.99, 0, 1.5], scale=.01,
+                         path_type="static", strict=True, jitter=True, clearance_fn=cl, ray_fn=ray, max_tries=2)
+
+
+def test_full_rotation_jitter_metadata():
+    view = cams.sample_view(np.random.default_rng(8), T, FPS, INTR, [0, -4, 2], 4,
+                            target=np.array([0, 0, 1]), path_type="static", jitter=True)
+    p = view["meta"]["jitter_params"]
+    relative = np.swapaxes(np.asarray(p["pre_jitter_R_cw"]), 1, 2) @ view["R"]
+    theta = np.arccos(np.clip((np.trace(relative, axis1=1, axis2=2) - 1) / 2, -1, 1))
+    assert np.isclose(np.degrees(np.sqrt(np.mean(theta**2))), p["applied_rot_rms_deg"])

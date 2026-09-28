@@ -1,0 +1,18 @@
+{
+  "frames": 96,
+  "fps": 24,
+  "width": 640,
+  "height": 360,
+  "views": 4,
+  "samples": 128,
+  "overlap": "all",
+  "split": "pilot_v02",
+  "scene_seeds": {
+    "nature_creatures": 101,
+    "nature_wind": 102,
+    "indoor_physics": 103,
+    "indoor_artic": 104
+  },
+  "total_budget_usd": 50,
+  "prior_spend_usd": 3.35
+}

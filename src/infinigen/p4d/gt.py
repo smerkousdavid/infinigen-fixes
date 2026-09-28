@@ -206,6 +206,14 @@ def tri_areas(co, tri):
     return 0.5 * np.linalg.norm(np.cross(co[tri[:, 1]] - co[tri[:, 0]], co[tri[:, 2]] - co[tri[:, 0]]), axis=1)
 
 
+def closed_mesh(tri):
+    """Every undirected edge must have two oppositely oriented incident faces."""
+    edges = np.concatenate([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]])
+    undirected, inverse, counts = np.unique(np.sort(edges, axis=1), axis=0, return_inverse=True, return_counts=True)
+    signs = np.where(edges[:, 0] < edges[:, 1], 1, -1)
+    return bool(len(undirected) and np.all(counts == 2) and np.all(np.bincount(inverse, weights=signs) == 0))
+
+
 def sample_bary(rng, n):
     u, v = rng.random(n), rng.random(n)
     f = u + v > 1
@@ -229,12 +237,19 @@ def setup_render(samples=128, device="OPTIX", width=None, height=None):
     s.render.engine = "CYCLES"
     s.cycles.samples = samples
     s.cycles.use_adaptive_sampling = True
-    s.cycles.adaptive_threshold = 0.02
+    s.cycles.adaptive_threshold = 0.01
     s.cycles.use_denoising = True
+    # Containers expose the host's 96+ cores even when the pod has 9 vCPUs.
+    # Bound render/compositor workers to avoid starving GPU synchronization.
+    s.render.threads_mode = "FIXED"
+    s.render.threads = int(os.environ.get("P4D_RENDER_THREADS", "8"))
+    if hasattr(s.cycles, "denoising_use_gpu"):
+        s.cycles.denoising_use_gpu = True
     if width:
         s.render.resolution_x, s.render.resolution_y = width, height
     s.render.resolution_percentage = 100
     s.render.use_motion_blur = False
+    s.view_settings.view_transform = "AgX"
     s.render.use_persistent_data = True  # keep the synced scene between frames (per-frame sync dominated)
     s.render.film_transparent = False
     prefs = bpy.context.preferences.addons["cycles"].preferences
@@ -255,6 +270,7 @@ def setup_render(samples=128, device="OPTIX", width=None, height=None):
     vl.use_pass_normal = True
     vl.use_pass_object_index = True
     vl.use_pass_vector = True
+    vl.use_pass_position = True
     s.use_nodes = True
     nt = s.node_tree
     for n in list(nt.nodes):
@@ -267,7 +283,7 @@ def setup_render(samples=128, device="OPTIX", width=None, height=None):
     fo.format.color_depth = "32"
     fo.format.exr_codec = "ZIP"
     fo.file_slots.clear()
-    for name in ("Depth", "Normal", "IndexOB", "Vector"):
+    for name in ("Depth", "Normal", "IndexOB", "Vector", "Position"):
         fo.file_slots.new(name)
         nt.links.new(rl.outputs[name], fo.inputs[name])
     # the File Output stores the 4D Vector socket as XYZ only; W (next-frame v) goes through Separate Color
@@ -284,23 +300,19 @@ def setup_render(samples=128, device="OPTIX", width=None, height=None):
 
 def camera_matrices(cam, frames):
     import bpy
+    from infinigen.p4d.cameras import Intrinsics
 
     s = bpy.context.scene
-    W = s.render.resolution_x
-    H = s.render.resolution_y
     Ks, Es = [], []
     for f in frames:
         s.frame_set(f)
-        d = cam.data
-        fit = d.sensor_fit
-        if fit == "AUTO":
-            fit = "HORIZONTAL" if W >= H else "VERTICAL"
-        sensor = d.sensor_width if fit == "HORIZONTAL" else d.sensor_height
-        f_px = d.lens / sensor * (W if fit == "HORIZONTAL" else H)
-        cx = W / 2 - d.shift_x * max(W, H)
-        cy = H / 2 + d.shift_y * max(W, H)
-        Ks.append(np.array([[f_px, 0, cx], [0, f_px, cy], [0, 0, 1.0]]))
-        M = np.array(cam.matrix_world) @ np.diag([1.0, -1, -1, 1])
+        dg = bpy.context.evaluated_depsgraph_get()
+        Ks.append(Intrinsics.from_camera(cam, s, dg).K())
+        M = np.array(cam.evaluated_get(dg).matrix_world) @ np.diag([1.0, -1, -1, 1])
+        # Camera scale is not part of a Euclidean world-to-camera pose.
+        M[:3, :3] /= np.linalg.norm(M[:3, :3], axis=0)
+        if not np.allclose(M[:3, :3].T @ M[:3, :3], np.eye(3), atol=1e-6) or np.linalg.det(M[:3, :3]) < 0:
+            raise ValueError("camera transform contains shear or reflection")
         Es.append(np.linalg.inv(M))
     return np.stack(Ks), np.stack(Es)
 
@@ -310,7 +322,7 @@ class Tracker:
     """Collects the sampled tracks; `step(frame)` evaluates every sample at the current frame."""
 
     def __init__(self, rng, dyn_objects, instancers, n_mesh=10000, n_inst=3000, pts_per_inst=4,
-                 interior_frac=0.05, cameras=None):
+                 interior_frac=0.05, cameras=None, frames=None):
         import bpy
 
         self.rng = rng
@@ -333,7 +345,8 @@ class Tracker:
         for (o, co, tri, a), n in zip(meshes, counts):
             n = int(max(n, 24))
             ti = rng.choice(len(tri), n, p=a / a.sum())
-            self.mesh.append(dict(obj=o, nv=len(co), nt=len(tri), ti=ti, bary=sample_bary(rng, n), alive=True))
+            self.mesh.append(dict(obj=o, nv=len(co), nt=len(tri), topology=tri.copy(), ti=ti,
+                                  bary=sample_bary(rng, n), alive=True))
             self.report["objects"][o.name] = dict(n=n, kind=object_kind(o))
         # --- interior samples for closed rigid meshes (surface = 0): inside test by ray parity (+x) in world
         self.interior = []
@@ -345,6 +358,8 @@ class Tracker:
 
             per = max(4, n_int // len(rig))
             for o, co, tri, a in rig:
+                if not closed_mesh(tri):
+                    continue
                 bvh = BVHTree.FromPolygons(co.tolist(), tri.tolist(), all_triangles=True)
                 lo, hi = co.min(0), co.max(0)
                 pts = []
@@ -370,41 +385,42 @@ class Tracker:
         self._inst_keys = set()
         if instancers and n_inst > 0:
             names = {o.name for o in instancers}
-            cand = []
-            campos = np.array([np.array(c.matrix_world.translation) for c in (cameras or [])]) if cameras else None
-            for ins in self.dg.object_instances:
-                if not ins.is_instance or ins.parent is None or ins.parent.original.name not in names:
-                    continue
-                src = ins.instance_object
-                if src.type != "MESH":
-                    continue
-                key = (ins.parent.original.name, tuple(ins.persistent_id))
-                pos = np.array(ins.matrix_world.translation)
-                cand.append((key, src.original.name, pos))
-            if cand:
-                pos = np.array([c[2] for c in cand])
-                if campos is not None and len(campos):
-                    d = np.min(np.linalg.norm(pos[:, None] - campos[None], axis=-1), axis=1)
-                    wgt = 1.0 / np.maximum(d, 1.0) ** 2
-                else:
-                    wgt = np.ones(len(cand))
-                k = min(len(cand), max(1, n_inst // pts_per_inst))
-                pick = rng.choice(len(cand), k, replace=False, p=wgt / wgt.sum())
-                srcmesh = {}
-                for i in pick:
-                    key, srcname, _ = cand[i]
+            candidates, srcmesh = {}, {}
+            scene = bpy.context.scene
+            initial = scene.frame_current
+            # Discover the whole lifetime, not just particles alive at frame zero.
+            for frame in frames or [initial]:
+                scene.frame_set(frame)
+                dg = bpy.context.evaluated_depsgraph_get()
+                for ins in dg.object_instances:
+                    if not ins.is_instance or ins.parent is None or ins.parent.original.name not in names:
+                        continue
+                    src = ins.instance_object
+                    if src is None or src.type != "MESH":
+                        continue
+                    srcname = src.original.name
+                    key = (ins.parent.original.name, srcname, tuple(ins.persistent_id))
+                    if key not in candidates:
+                        candidates[key] = srcname
                     if srcname not in srcmesh:
-                        src = bpy.data.objects[srcname]
-                        co, tri = local_mesh(src.evaluated_get(self.dg))
-                        srcmesh[srcname] = (co, tri, tri_areas(co, tri))
+                        co, tri = local_mesh(src)
+                        srcmesh[srcname] = co, tri, tri_areas(co, tri)
+            keys = sorted(candidates)
+            if keys:
+                pick = rng.choice(len(keys), min(len(keys), max(1, n_inst // pts_per_inst)), replace=False)
+                for i in sorted(pick):
+                    key = keys[i]
+                    srcname = candidates[key]
                     co, tri, a = srcmesh[srcname]
-                    if len(tri) == 0 or a.sum() <= 0:
+                    if not len(tri) or a.sum() <= 0:
                         continue
                     ti = rng.choice(len(tri), pts_per_inst, p=a / a.sum())
                     self.inst.append(dict(key=key, src=srcname, ti=ti, bary=sample_bary(rng, pts_per_inst),
-                                          parent=key[0]))
+                                          parent=key[0], topology=tri.copy(), nv=len(co)))
                     self._inst_keys.add(key)
-            self.report["instances"] = dict(candidates=len(cand), tracked=len(self.inst))
+            scene.frame_set(initial)
+            self.report["instances"] = dict(candidates=len(keys), tracked=len(self.inst),
+                                              lifetime_discovery_frames=len(frames or [initial]))
         self.xyz, self.nrm = [], []
 
     def step(self):
@@ -419,7 +435,7 @@ class Tracker:
                 Nn.append(np.full((n, 3), np.nan))
                 continue
             co, tri = eval_mesh(m["obj"], dg)
-            if co is None or len(co) != m["nv"] or len(tri) != m["nt"]:
+            if co is None or len(co) != m["nv"] or not np.array_equal(tri, m["topology"]):
                 m["alive"] = False
                 self.report["dropped_topology"].append(m["obj"].name)
                 X.append(np.full((n, 3), np.nan))
@@ -437,7 +453,7 @@ class Tracker:
             for ins in dg.object_instances:
                 if not ins.is_instance or ins.parent is None:
                     continue
-                key = (ins.parent.original.name, tuple(ins.persistent_id))
+                key = (ins.parent.original.name, ins.instance_object.original.name, tuple(ins.persistent_id))
                 if key in self._inst_keys:
                     mats[key] = np.array(ins.matrix_world)
             cache = {}
@@ -451,6 +467,8 @@ class Tracker:
                 if it["src"] not in cache:
                     cache[it["src"]] = local_mesh(bpy.data.objects[it["src"]].evaluated_get(dg))
                 co, tri = cache[it["src"]]
+                if len(co) != it["nv"] or not np.array_equal(tri, it["topology"]):
+                    raise ValueError(f"instance source changes topology: {it['src']}")
                 x, nn = eval_points(co, tri, it["ti"], it["bary"])
                 X.append(x @ M[:3, :3].T + M[:3, 3])
                 nw = nn @ np.linalg.inv(M[:3, :3])  # normals transform with inverse-transpose
@@ -474,7 +492,8 @@ class Tracker:
 
         for it in self.inst:
             n = len(it["ti"])
-            pidx.append(np.full(n, bpy.data.objects[it["parent"]].pass_index))
+            # Cycles Object Index belongs to the source object, not the emitter.
+            pidx.append(np.full(n, bpy.data.objects[it["src"]].pass_index))
             surf.append(np.ones(n, np.int8))
             src.append(np.full(n, 2, np.int8))
         cat = (lambda L, dt: np.concatenate(L).astype(dt) if L else np.zeros(0, dt))
@@ -513,7 +532,10 @@ def static_background(out, views, frames_idx, T, kinds_by_pidx, n_total=6000, rn
             K, E = cam["K"][t], cam["E_world2cv"][t]
             pc = np.stack([(xs + 0.5 - K[0, 2]) / K[0, 0] * zz, (ys + 0.5 - K[1, 2]) / K[1, 1] * zz, zz], 1)
             Ecw = np.linalg.inv(E)
-            xyz.append(pc @ Ecw[:3, :3].T + Ecw[:3, 3])
+            if all(f"Position.{c}" in ch for c in "XYZ"):
+                xyz.append(np.stack([ch[f"Position.{c}"] for c in "XYZ"], -1)[ys, xs])
+            else:
+                xyz.append(pc @ Ecw[:3, :3].T + Ecw[:3, 3])
             n = np.stack([ch["Normal.X"], ch["Normal.Y"], ch["Normal.Z"]], -1)[ys, xs].astype(np.float64)
             nrm.append(n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9))
             pid.append(idx[ys, xs])
@@ -525,6 +547,8 @@ def static_background(out, views, frames_idx, T, kinds_by_pidx, n_total=6000, rn
 
 
 def _git_commit():
+    if os.environ.get("INFINIGEN_FORK_REVISION"):
+        return os.environ["INFINIGEN_FORK_REVISION"]
     try:
         root = Path(__file__).resolve().parents[3]
         return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
@@ -534,6 +558,32 @@ def _git_commit():
 
 
 UPSTREAM_COMMIT = "3f58bb886bb1bda681d41240344fe3126ac0e9bd"
+
+
+def clearance_report(objects, cameras, frames):
+    """Check every evaluated camera frame against static and moving mesh geometry."""
+    import bpy
+    from infinigen.p4d.cameras import blender_bvh_callbacks
+
+    scene = bpy.context.scene
+    scene.frame_set(frames[0])
+    static = [o for o in objects if o.type == "MESH" and object_kind(o) == "static"]
+    moving = [o for o in objects if o.type == "MESH" and object_kind(o) != "static"]
+    static_clear, _, _ = blender_bvh_callbacks(static)
+    result = np.full((len(frames), len(cameras)), np.inf)
+    for t, frame in enumerate(frames):
+        scene.frame_set(frame)
+        dg = bpy.context.evaluated_depsgraph_get()
+        p = np.array([c.evaluated_get(dg).matrix_world.translation[:] for c in cameras])
+        result[t] = static_clear(p)
+        if moving:
+            dynamic_clear, _, _ = blender_bvh_callbacks(moving, dg)
+            result[t] = np.minimum(result[t], dynamic_clear(p))
+    if np.any(result < .3):
+        t, v = np.unravel_index(np.argmin(result), result.shape)
+        raise ValueError(f"camera {v} violates 0.3m clearance at frame {frames[t]}: {result[t, v]:.4f}m")
+    return dict(min_per_view_m=result.min(0).tolist(), frames_checked=len(frames),
+                geometry="evaluated mesh objects; rendered depth additionally checks visible instances")
 
 
 def export_scene(out, cameras, family, seed, views_meta=None, motion=None, samples=128, n_mesh=10000,
@@ -567,21 +617,40 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
             kinds[o.pass_index] = "particle"
         elif instancer_filter is not None and instancer_filter(o):
             instancers.append(o)
-    # source objects of dynamic instancers render with the instancer's index? give them the same index when unique
     s.frame_set(fs)
     # mesh samples on every dynamic mesh except pure particle emitters (wind trees are tracked both as meshes and
     # through their GN instances, e.g. leaves)
     dyn = [o for o in rend if o.type == "MESH" and kinds[o.pass_index] in DYNAMIC_KINDS
            and not (o.particle_systems and len(o.particle_systems))]
+    geometry_checks = clearance_report(rend, cameras, frames)
+    s.frame_set(fs)
     t1 = time.time()
     tracker = Tracker(rng, dyn, instancers, n_mesh=n_mesh, n_inst=n_inst, interior_frac=interior_frac,
-                      cameras=cameras)
+                      cameras=cameras, frames=frames)
+    for instance in tracker.inst:
+        obj = bpy.data.objects[instance["src"]]
+        parent = bpy.data.objects[instance["parent"]]
+        if obj.pass_index == 0 or table.get(obj.pass_index, {}).get("name") != obj.name:
+            obj.pass_index = max(table, default=0) + 1
+            table[obj.pass_index] = dict(name=obj.name, factory=_factory(obj), **{"class": class_hint(obj)})
+        kind = kinds[parent.pass_index]
+        kinds[obj.pass_index] = kind
+        table[obj.pass_index].update(kind=kind, instance_granularity="source_template")
+    if tracker.inst:
+        tracker.report["instances"]["identity"] = "parent/source/persistent_id; segmentation uses source template"
+        tracker.report["instances"]["keys"] = [dict(parent=i["parent"], source=i["src"],
+            persistent_id=list(i["key"][2]), points=len(i["ti"])) for i in tracker.inst]
     for f in frames:
         s.frame_set(f)
         tracker.step()
     xyz, nrm, pidx, surf, src = tracker.arrays()
     t_track = time.time() - t1
     motion = dict(motion or {})
+    motion["gaits"] = {o.name: json.loads(o["p4d_gait_report"]) for o in s.objects if o.get("p4d_gait_report")}
+    if motion["gaits"]:
+        from infinigen.p4d.motion.creatures import evaluate_contacts
+        for gait in motion["gaits"].values():
+            gait["evaluated_contacts"] = evaluate_contacts(gait, frames)
     if vertex_check:
         chk = [o for o in dyn if kinds[o.pass_index] in ("creature", "wind", "articulated", "deform")]
         chk = sorted(chk, key=lambda o: -tracker.report["objects"].get(o.name, {}).get("n", 0))[:60]
@@ -589,12 +658,16 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
                                                                      fs + 3 * (fe - fs) // 4, fe}))
     # render
     fo, dev, devtype = setup_render(samples=samples, device=device)
+    s.cycles.seed = int(seed)
+    s.cycles.use_animated_seed = False
     rtimes = []
     for v, cam in enumerate(cameras):
+        cam.data.dof.use_dof = False
         vd = out / f"view_{v:02d}"
         vd.mkdir(exist_ok=True)
         K, E = camera_matrices(cam, frames)
-        np.savez(vd / "camera.npz", K=K, E_world2cv=E)
+        np.savez(vd / "camera.npz", K=K, E_world2cv=E,
+                 timestamps_s=np.arange(T, dtype=np.float64) / (s.render.fps / s.render.fps_base))
         s.camera = cam
         fo.base_path = str(vd / "passes_")
         s.render.filepath = str(vd / "rgb_")
@@ -614,7 +687,8 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
     np.savez_compressed(out / "tracks_raw.npz", xyz_world=xyz, normal_world=nrm, surface=surf, pass_index=pidx,
                         source=src)
     (out / "objects.json").write_text(json.dumps({str(k): v for k, v in table.items()}, indent=0))
-    W, H = s.render.resolution_x, s.render.resolution_y
+    W, H = (int(s.render.resolution_x * s.render.resolution_percentage / 100),
+            int(s.render.resolution_y * s.render.resolution_percentage / 100))
     counts = {k: int((np.array([kinds.get(int(p), "static") for p in pidx]) == k).sum()) for k in
               ("static",) + DYNAMIC_KINDS}
     meta = dict(format="p4d_multiview_raw_v1", family=family, seed=int(seed), frames=T, width=W, height=H,
@@ -622,10 +696,15 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
                 fork_commit=_git_commit(), world_frame="Blender scene world (Z up, metres)",
                 views=[dict(m, view_id=i) for i, m in enumerate(views_meta or [{} for _ in cameras])],
                 motion=motion,
+                geometry_checks=geometry_checks,
                 tracks=dict(n=int(len(pidx)), by_source={str(k): int((src == k).sum()) for k in range(4)},
                             by_kind=counts, report=tracker.report),
                 render=dict(samples=samples, device=dev, device_type=devtype, n_renderable_objects=len(rend),
-                            n_viewport_unhidden=n_vis),
+                            n_viewport_unhidden=n_vis, adaptive_threshold=s.cycles.adaptive_threshold,
+                            view_transform=s.view_settings.view_transform, exposure=s.view_settings.exposure,
+                            cycles_film_exposure=s.cycles.film_exposure, motion_blur=False, depth_of_field=False,
+                            cpu_threads=s.render.threads,
+                            blender_version=bpy.app.version_string, seed=int(seed)),
                 timing=dict(extra_timing or {}, track_sample_eval_s=t_track, render_per_view_s=rtimes,
                             render_per_frame_s=float(np.sum(rtimes) / (T * len(cameras))),
                             static_bg_s=time.time() - t2, export_total_s=time.time() - t0))
@@ -662,7 +741,16 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
         if o.name.startswith("scatter:") and wind_strength > 0 and wind_scatters and wind.VEGETATION.search(o.name):
             o["p4d_kind"] = "wind"
     out = Path(out_dir) if out_dir else Path(frames_folder) / "p4d"
-    return export_scene(out, cams, family, seed, views_meta=views, motion=motion, samples=samples, n_mesh=n_mesh,
-                        n_inst=n_inst, n_static=n_static,
-                        extra_timing={"wind_setup_s": time.time() - tw},
-                        instancer_filter=lambda o: o.get("p4d_kind") == "wind")
+    tiers = list(dict.fromkeys(v.get("overlap_target", "none") for v in views))
+    results = []
+    for tier in tiers:
+        indices = [i for i, v in enumerate(views) if v.get("overlap_target", "none") == tier]
+        destination = out.with_name(out.name + "_" + tier) if tier != "none" else out
+        result = export_scene(destination, [cams[i] for i in indices], family, seed,
+                              views_meta=[views[i] for i in indices], motion=motion, samples=samples, n_mesh=n_mesh,
+                              n_inst=n_inst, n_static=n_static, extra_timing={"wind_setup_s": time.time() - tw},
+                              instancer_filter=lambda o: o.get("p4d_kind") == "wind")
+        result.update(scene_id=out.name, overlap_target=tier if tier != "none" else None)
+        (destination / "scene_meta.json").write_text(json.dumps(result, indent=1, default=str))
+        results.append(result)
+    return results

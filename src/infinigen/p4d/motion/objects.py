@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import hashlib
 
 import numpy as np
 
@@ -29,7 +30,19 @@ def world_bbox(o):
     dg = bpy.context.evaluated_depsgraph_get()
     eo = o.evaluated_get(dg)
     M = np.array(eo.matrix_world)
-    bb = np.array([list(v) for v in eo.bound_box])
+    mesh = eo.to_mesh()
+    mesh.calc_loop_triangles()
+    if len(mesh.loop_triangles):
+        # Sim assets carry loose vertices/edges encoding joint axes and limits.
+        # They are not rendered surfaces and must not inflate collision bounds.
+        triangles = np.empty(len(mesh.loop_triangles) * 3, np.int32)
+        mesh.loop_triangles.foreach_get("vertices", triangles)
+        vertices = np.empty(len(mesh.vertices) * 3, np.float64)
+        mesh.vertices.foreach_get("co", vertices)
+        bb = vertices.reshape(-1, 3)[np.unique(triangles)]
+    else:
+        bb = np.array([list(v) for v in eo.bound_box])
+    eo.to_mesh_clear()
     w = bb @ M[:3, :3].T + M[:3, 3]
     return w.min(0), w.max(0)
 
@@ -87,6 +100,16 @@ def _launch(o, frame_start, v, w=(0.0, 0.0, 0.0), fps=24.0):
     rb.keyframe_insert("kinematic", frame=frame_start + 1)
     rb.kinematic = False
     rb.keyframe_insert("kinematic", frame=frame_start + 2)
+    # Keep a nonzero derivative at release. Blender's default constant
+    # extrapolation after the last transform key otherwise cancels the impulse.
+    o.location = p0 + type(p0)(v) * (2 * dt)
+    o.rotation_euler = (r0.x + w[0] * 2 * dt, r0.y + w[1] * 2 * dt, r0.z + w[2] * 2 * dt)
+    o.keyframe_insert("location", frame=frame_start + 2)
+    o.keyframe_insert("rotation_euler", frame=frame_start + 2)
+    for curve in o.animation_data.action.fcurves:
+        curve.extrapolation = "LINEAR"
+        for key in curve.keyframe_points:
+            key.interpolation = "CONSTANT" if "kinematic" in curve.data_path else "LINEAR"
     o.location, o.rotation_euler = p0, r0
 
 
@@ -110,13 +133,35 @@ def add_ball(radius, name, material=None):
         bsdf = mat.node_tree.nodes["Principled BSDF"]
         chk = mat.node_tree.nodes.new("ShaderNodeTexChecker")  # texture so rolling is visible
         chk.inputs["Scale"].default_value = 6.0
-        c = np.random.default_rng(abs(hash(name)) % 2**31).uniform(0.1, 0.9, 3)
+        color_seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little")
+        c = np.random.default_rng(color_seed).uniform(0.1, 0.9, 3)
         chk.inputs["Color1"].default_value = (*c, 1)
         chk.inputs["Color2"].default_value = (*(1 - c), 1)
         mat.node_tree.links.new(chk.outputs["Color"], bsdf.inputs["Base Color"])
         bsdf.inputs["Roughness"].default_value = 0.5
     o.data.materials.append(mat)
     return o
+
+
+def chair_sweep_clear(chair, obstacles, away, distance, yaw, frame_count):
+    """Test actual chair surfaces: a tucked chair overlaps the table's AABB."""
+    import bpy
+    from mathutils.bvhtree import BVHTree
+    from infinigen.p4d import cameras as C
+    from infinigen.p4d.gt import eval_mesh
+
+    _, _, scene_bvh = C.blender_bvh_callbacks(obstacles)
+    co, tri = eval_mesh(chair, bpy.context.evaluated_depsgraph_get())
+    origin = np.asarray(chair.matrix_world.translation)
+    for s in np.linspace(0, 1, max(frame_count, 2)):
+        angle = yaw * s
+        c, sn = np.cos(angle), np.sin(angle)
+        rotation = np.array([[c, -sn, 0], [sn, c, 0], [0, 0, 1.]])
+        points = (co - origin) @ rotation.T + origin + np.r_[away * distance * s, 0]
+        chair_bvh = BVHTree.FromPolygons(points.tolist(), tri.tolist(), all_triangles=True)
+        if chair_bvh.overlap(scene_bvh):
+            return False
+    return True
 
 
 def setup_physics(rng, scene_objects, small_objects, room_bbox, frame_start, frame_end, fps=24.0, n_drop=(3, 6),
@@ -134,6 +179,9 @@ def setup_physics(rng, scene_objects, small_objects, room_bbox, frame_start, fra
     # passive colliders: everything else that is a mesh (room shell + furniture)
     nd = int(rng.integers(n_drop[0], n_drop[1] + 1))
     ns = int(rng.integers(n_slide[0], n_slide[1] + 1))
+    if len(small) < 2:
+        raise ValueError("physics scene needs at least two supported small objects for drop and slide")
+    nd = min(nd, len(small) - 1)
     drops, slides = small[:nd], small[nd:nd + ns]
     chosen = set(o.name for o in drops + slides)
     for o in scene_objects:
@@ -150,27 +198,37 @@ def setup_physics(rng, scene_objects, small_objects, room_bbox, frame_start, fra
             continue
         mass = float(np.clip(300 * np.prod(np.maximum(mx - mn, 0.02)), 0.05, 5.0))
         _add_rb(o, "ACTIVE", "CONVEX_HULL", mass=mass, friction=0.6, restitution=float(rng.uniform(0.05, 0.35)))
-        h = float(rng.uniform(0.3, 1.2))
+        headroom = float(hi[2] - mx[2] - .1)
+        if headroom < .3:
+            o.rigid_body.type = "PASSIVE"
+            continue
+        h = float(rng.uniform(.3, min(1.2, headroom)))
         o.location.z += h
         v = (float(rng.normal(0, 0.6)), float(rng.normal(0, 0.6)), float(rng.uniform(-0.5, 1.0)))
         w = tuple(float(x) for x in rng.normal(0, 3.0, 3))
         _launch(o, frame_start, v, w, fps)
         o["p4d_kind"], o["p4d_motion"] = "rigid", "drop"
         movers.add(o.name)
-        summary["drops"].append(dict(object=o.name, lift_m=h, v=v, w=w, mass=mass))
+        summary["drops"].append(dict(object=o.name, lift_m=h, v=v, w=w, mass=mass,
+                                     actuation="initial release and impulse", friction=o.rigid_body.friction,
+                                     restitution=o.rigid_body.restitution))
     for o in slides:  # push along its support surface (it will slide / tip / fall off edges)
         mn, mx = world_bbox(o)
         if np.max(mx - mn) > 0.8:
             continue
-        _add_rb(o, "ACTIVE", "CONVEX_HULL", mass=0.5, friction=float(rng.uniform(0.2, 0.45)), restitution=0.05)
+        mass = float(np.clip(300 * np.prod(np.maximum(mx - mn, .02)), .05, 5.))
+        _add_rb(o, "ACTIVE", "CONVEX_HULL", mass=mass, friction=float(rng.uniform(0.2, 0.45)), restitution=0.05)
         ang = rng.uniform(0, 2 * math.pi)
         spd = float(rng.uniform(0.6, 1.6))
         v = (spd * math.cos(ang), spd * math.sin(ang), 0.0)
         o.location.z += 0.003
-        _launch(o, frame_start, v, (0.0, 0.0, float(rng.normal(0, 1.0))), fps)
+        w = (0.0, 0.0, float(rng.normal(0, 1.0)))
+        _launch(o, frame_start, v, w, fps)
         o["p4d_kind"], o["p4d_motion"] = "rigid", "slide"
         movers.add(o.name)
-        summary["slides"].append(dict(object=o.name, speed_mps=spd, heading_deg=math.degrees(ang)))
+        summary["slides"].append(dict(object=o.name, speed_mps=spd, heading_deg=math.degrees(ang),
+                                      actuation="initial horizontal impulse", mass=mass, v=v, w=w,
+                                      friction=o.rigid_body.friction))
     nr = int(rng.integers(n_roll[0], n_roll[1] + 1))
     for i in range(nr):  # balls rolling across the floor
         r = float(rng.uniform(0.06, 0.16))
@@ -184,6 +242,9 @@ def setup_physics(rng, scene_objects, small_objects, room_bbox, frame_start, fra
                     continue
                 zf = zh
             break
+        else:
+            bpy.data.objects.remove(b, do_unlink=True)
+            raise ValueError("could not find an unoccupied support for a rolling ball")
         b.location = (x, y, zf + r + 0.002)
         _add_rb(b, "ACTIVE", "SPHERE", mass=float(4 / 3 * math.pi * r**3 * 400), friction=0.5, restitution=0.4)
         b.rigid_body.linear_damping, b.rigid_body.angular_damping = 0.02, 0.05
@@ -195,19 +256,38 @@ def setup_physics(rng, scene_objects, small_objects, room_bbox, frame_start, fra
         _launch(b, frame_start, v, wv, fps)
         b["p4d_kind"], b["p4d_motion"], b["p4d_class"] = "rigid", "roll", "ball"
         movers.add(b.name)
-        summary["rolls"].append(dict(object=b.name, radius_m=r, speed_mps=spd))
+        summary["rolls"].append(dict(object=b.name, radius_m=r, speed_mps=spd,
+                                    actuation="initial rolling impulse", mass=b.rigid_body.mass, v=v, w=wv))
     npush = int(rng.integers(push_chairs[0], push_chairs[1] + 1)) if chairs else 0
-    for c in list(chairs)[:npush]:  # keyframed push (chairs are big/complex: no simulation)
+    for c in chairs:  # try all available chairs until the requested number fits
+        if len(summary["chairs"]) >= npush:
+            _add_rb(c, "PASSIVE", "MESH")
+            continue
         mn, mx = world_bbox(c)
         ctr = (mn + mx) / 2
         room_c = (lo + hi) / 2
-        away = ctr[:2] - room_c[:2]
+        tables = [sum(world_bbox(o)) / 2 for o in scene_objects if "dining_table" in o.name]
+        support_centre = min(tables, key=lambda p: np.linalg.norm(p[:2] - ctr[:2])) if tables else room_c
+        away = ctr[:2] - support_centre[:2]
         away = away / max(np.linalg.norm(away), 1e-6)
         d = float(rng.uniform(0.2, 0.6))
-        yaw = float(rng.normal(0, math.radians(12)))
+        yaw = 0.0  # straight pull from the table; avoid sweeping chair legs sideways
         t0 = int(rng.integers(frame_start, frame_start + max(1, (frame_end - frame_start) // 3)))
         t1 = min(frame_end, t0 + int(rng.integers(12, 30)))
         p0, r0 = c.location.copy(), c.rotation_euler.copy()
+        # A kinematic chair cannot resolve interpenetrations: reject its swept AABB first.
+        swept_lo = mn + np.r_[np.minimum(0, away * d), 0]
+        swept_hi = mx + np.r_[np.maximum(0, away * d), 0]
+        yaw_pad = .5 * np.linalg.norm((mx - mn)[:2]) * abs(yaw)
+        swept_lo[:2] -= yaw_pad
+        swept_hi[:2] += yaw_pad
+        obstacles = [o for o in scene_objects if o.type == "MESH" and o != c and
+                     not o.name.startswith(("room_floor", "room_skirting", "rug.")) and o.name not in chosen]
+        if np.any(swept_lo[:2] < lo[:2] + .02) or np.any(swept_hi[:2] > hi[:2] - .02) or not chair_sweep_clear(
+                c, obstacles, away, d, yaw, frame_end - frame_start + 1):
+            logger.info(f"rejecting obstructed chair push: {c.name}")
+            _add_rb(c, "PASSIVE", "MESH")
+            continue
         for f in range(frame_start, frame_end + 1):
             s = np.clip((f - t0) / max(t1 - t0, 1), 0, 1)
             s = s * s * (3 - 2 * s)
@@ -223,7 +303,8 @@ def setup_physics(rng, scene_objects, small_objects, room_bbox, frame_start, fra
             _add_rb(c, "PASSIVE", "CONVEX_HULL")
             c.rigid_body.kinematic = True
         movers.add(c.name)
-        summary["chairs"].append(dict(object=c.name, dist_m=d, yaw_deg=math.degrees(yaw), frames=[t0, t1]))
+        summary["chairs"].append(dict(object=c.name, dist_m=d, yaw_deg=math.degrees(yaw), frames=[t0, t1],
+                                      actuation="externally pushed kinematic chair", swept_clearance_checked=True))
     summary["movers"] = sorted(movers)
     return summary
 
@@ -239,6 +320,103 @@ def bake(frame_start, frame_end):
         bpy.ops.ptcache.free_bake_all()
         bpy.ops.ptcache.bake_all(bake=True)
     s.frame_set(frame_start)
+
+
+def bake_explicit(frame_start, frame_end, summary, fps=24, substeps=20):
+    """CPU Bullet with explicit velocities, then bake its poses into Blender.
+
+    Blender resets velocity at the kinematic/dynamic handoff. PyBullet exposes
+    resetBaseVelocity, so drops, slides and rolling impulses are reproducible.
+    Both render geometry and tracks subsequently evaluate the same baked poses.
+    """
+    import bpy
+    import pybullet as bullet
+    from mathutils import Matrix
+    from infinigen.p4d.gt import eval_mesh
+
+    scene = bpy.context.scene
+    frames = list(range(frame_start, frame_end + 1))
+    scene.frame_set(frame_start)
+    scene.rigidbody_world.enabled = False
+    moving = set(summary["movers"])
+    chairs = {r["object"] for r in summary["chairs"]}
+    dynamic = moving - chairs
+    records = {r["object"]: r for k in ("drops", "slides", "rolls") for r in summary[k]}
+    objects = [o for o in scene.objects if o.type == "MESH" and o.rigid_body is not None]
+    client = bullet.connect(bullet.DIRECT)
+    bodies, tracks = {}, {n: [] for n in dynamic}
+    try:
+        bullet.setGravity(0, 0, -9.81, physicsClientId=client)
+        bullet.setTimeStep(1 / (fps * substeps), physicsClientId=client)
+        bullet.setPhysicsEngineParameter(numSolverIterations=80, deterministicOverlappingPairs=1,
+                                         physicsClientId=client)
+        for obj in objects:
+            co, tri = eval_mesh(obj, bpy.context.evaluated_depsgraph_get())
+            if not len(tri):
+                continue
+            centre = (co[np.unique(tri)].min(0) + co[np.unique(tri)].max(0)) / 2
+            mass = obj.rigid_body.mass if obj.name in dynamic else 0
+            shape_args = dict(shapeType=bullet.GEOM_MESH, vertices=(co - centre).tolist())
+            if obj.name in records and "radius_m" in records[obj.name]:
+                shape_args = dict(shapeType=bullet.GEOM_SPHERE, radius=records[obj.name]["radius_m"])
+            elif mass == 0:
+                shape_args.update(indices=tri.ravel().tolist(), flags=bullet.GEOM_FORCE_CONCAVE_TRIMESH)
+            collision = bullet.createCollisionShape(**shape_args, physicsClientId=client)
+            body = bullet.createMultiBody(baseMass=mass, baseCollisionShapeIndex=collision,
+                                          basePosition=centre.tolist(), physicsClientId=client)
+            rb = obj.rigid_body
+            bullet.changeDynamics(body, -1, lateralFriction=rb.friction, restitution=rb.restitution,
+                                  linearDamping=rb.linear_damping, angularDamping=rb.angular_damping,
+                                  collisionMargin=.002, physicsClientId=client)
+            bodies[obj.name] = (body, centre, np.asarray(obj.matrix_world).copy())
+            if mass:
+                record = records[obj.name]
+                if "v" in record:
+                    velocity, spin = record["v"], record["w"]
+                else:
+                    if "heading_deg" in record:
+                        angle = np.radians(record["heading_deg"])
+                        velocity = np.r_[record["speed_mps"] * np.array([np.cos(angle), np.sin(angle)]), 0]
+                        spin = [0, 0, 0]
+                    else:
+                        velocity, spin = record["v"], record["w"]
+                bullet.resetBaseVelocity(body, linearVelocity=velocity, angularVelocity=spin,
+                                         physicsClientId=client)
+        for frame in frames:
+            scene.frame_set(frame)
+            for name in chairs:
+                body, centre, original = bodies[name]
+                pose = np.asarray(bpy.data.objects[name].matrix_world) @ np.linalg.inv(original)
+                rot = Matrix(pose[:3, :3].tolist()).to_quaternion()
+                pos = pose[:3, :3] @ centre + pose[:3, 3]
+                bullet.resetBasePositionAndOrientation(body, pos, (rot.x, rot.y, rot.z, rot.w), physicsClientId=client)
+            if frame != frame_start:
+                for _ in range(substeps):
+                    bullet.stepSimulation(physicsClientId=client)
+            for name in dynamic:
+                body, centre, original = bodies[name]
+                pos, quat = bullet.getBasePositionAndOrientation(body, physicsClientId=client)
+                rot = np.asarray(bullet.getMatrixFromQuaternion(quat)).reshape(3, 3)
+                delta = np.eye(4)
+                delta[:3, :3], delta[:3, 3] = rot, np.asarray(pos) - rot @ centre
+                tracks[name].append(delta @ original)
+        for name, matrices in tracks.items():
+            obj = bpy.data.objects[name]
+            obj.animation_data_clear()
+            obj.rotation_mode = "QUATERNION"
+            for frame, matrix in zip(frames, matrices):
+                obj.matrix_world = Matrix(matrix.tolist())
+                obj.keyframe_insert("location", frame=frame)
+                obj.keyframe_insert("rotation_quaternion", frame=frame)
+            for curve in obj.animation_data.action.fcurves:
+                for key in curve.keyframe_points:
+                    key.interpolation = "LINEAR"
+        summary["simulation"] = dict(engine="PyBullet", api_version=bullet.getAPIVersion(),
+                                      fps=fps, substeps=substeps, gravity_mps2=[0, 0, -9.81],
+                                      initial_velocity="explicit", poses="baked to Blender world transforms")
+    finally:
+        bullet.disconnect(client)
+        scene.frame_set(frame_start)
 
 
 def motion_stats(names, frame_start, frame_end):

@@ -1,0 +1,25 @@
+{
+  "measurement": "camera_overlap_v1",
+  "schedule": "training project chooses epoch boundaries",
+  "phases": [
+    {
+      "name": "high_overlap",
+      "min_overlap": 0.6,
+      "max_overlap": 1.0
+    },
+    {
+      "name": "medium_overlap",
+      "min_overlap": 0.25,
+      "max_overlap": 0.6
+    },
+    {
+      "name": "low_overlap",
+      "min_overlap": 0.0,
+      "max_overlap": 0.25
+    }
+  ],
+  "pair_filter": "p4d_data.select_camera_pairs",
+  "baseline_field": "normalized_baseline",
+  "split_group": "scene_id",
+  "requested_is_not_label": true
+}

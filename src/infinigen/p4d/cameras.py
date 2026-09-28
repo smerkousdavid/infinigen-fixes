@@ -58,6 +58,28 @@ class Intrinsics:
     def K(self):
         return np.array([[self.fx, 0, self.cx], [0, self.fy, self.cy], [0, 0, 1.0]])
 
+    @classmethod
+    def from_projection(cls, projection, width, height):
+        """Blender perspective clip matrix -> OpenCV pixel-corner intrinsics."""
+        p = np.asarray(projection, np.float64)
+        if not np.allclose(p[3], [0, 0, -1, 0]):
+            raise ValueError("p4d requires perspective cameras")
+        return cls(width, height, p[0, 0] * width / 2, p[1, 1] * height / 2,
+                   (1 - p[0, 2]) * width / 2, (1 + p[1, 2]) * height / 2)
+
+    @classmethod
+    def from_camera(cls, cam, scene, depsgraph):
+        scale = scene.render.resolution_percentage / 100
+        width = int(scene.render.resolution_x * scale)
+        height = int(scene.render.resolution_y * scale)
+        evaluated = cam.evaluated_get(depsgraph)
+        if evaluated.data.type != "PERSP":
+            raise ValueError("p4d requires a PERSP camera")
+        p = evaluated.calc_matrix_camera(depsgraph, x=width, y=height,
+                                         scale_x=scene.render.pixel_aspect_x,
+                                         scale_y=scene.render.pixel_aspect_y)
+        return cls.from_projection(p, width, height)
+
 
 # ---------------------------------------------------------------------------------------------- geometry
 def look_rotation(forward, up=(0.0, 0.0, 1.0), roll=0.0):
@@ -224,7 +246,7 @@ def path_follow(rng, T, anchor, target, scale, **kw):
     min_speed = 0.02 * scale / fps if (fps := kw.get("fps")) else 1e-3
     for t in range(T):
         sp = np.linalg.norm(vel[t, :2])
-        if sp > min_speed:
+        if sp > min_speed and kw.get("turn_with_target", True):
             h = 0.85 * h + 0.15 * vel[t, :2] / sp
             h /= max(np.linalg.norm(h), 1e-9)
         heading[t] = h
@@ -236,7 +258,8 @@ def path_follow(rng, T, anchor, target, scale, **kw):
     back /= np.maximum(np.linalg.norm(back, axis=1, keepdims=True), 1e-6)
     h = kw.get("height") if kw.get("height") is not None else float(np.clip(anchor[2] - tgt[0, 2], 0.2 * dist, dist))
     pos = np.concatenate([sm[:, :2] + dist * back, sm[:, 2:3] + h], 1)
-    return pos, look_rotation(sm - pos), dict(lag_alpha=lag, dist=dist, side_deg=math.degrees(side_ang), height=h)
+    return pos, look_rotation(sm - pos), dict(lag_alpha=lag, dist=dist, side_deg=math.degrees(side_ang), height=h,
+                                             turn_with_target=kw.get("turn_with_target", True))
 
 
 def path_handheld(rng, T, anchor, target, scale, fps=24.0, **kw):
@@ -346,7 +369,8 @@ def validate_path(pos, R, intr: Intrinsics, clearance_fn=None, ray_fn=None, targ
 
 
 def sample_view(rng, T, fps, intr, anchor, scale, target=None, target_points=None, path_type=None, weights=None,
-                jitter_prob=0.25, clearance_fn=None, ray_fn=None, max_tries=12, **val_kw):
+                jitter_prob=0.25, clearance_fn=None, ray_fn=None, max_tries=12, strict=False,
+                jitter=None, path_params=None, **val_kw):
     """Sample one valid view. target: [T,3] (look target / followed object centre) or None.
     target_points: [T,P,3] points that must stay in frame (defaults to target). -> dict(pos, R, meta)."""
     weights = dict(weights or DEFAULT_WEIGHTS)
@@ -357,14 +381,15 @@ def sample_view(rng, T, fps, intr, anchor, scale, target=None, target_points=Non
     p = np.array([weights[k] for k in types], np.float64)
     p /= p.sum()
     tried = []
+    jitter_flag = bool(rng.random() < jitter_prob) if jitter is None else bool(jitter)
     for attempt in range(max_tries):
-        pt = path_type if (path_type and attempt < max_tries // 2) else str(rng.choice(types, p=p))
+        pt = path_type if (path_type and (strict or attempt < max_tries // 2)) else str(rng.choice(types, p=p))
         if pt in NEEDS_TARGET and target is None:
             pt = "handheld"
         fn = PATHS[pt]
-        kw = dict(fps=fps) if pt in ("handheld", "static", "follow") else {}
+        kw = dict(path_params or {}, fps=fps)
         pos, R, params = fn(rng, T, np.asarray(anchor, np.float64), target, scale, **kw)
-        jit = bool(rng.random() < jitter_prob)
+        jit = jitter_flag
         jparams = None
         if jit:
             pos0, R0 = pos, R
@@ -373,15 +398,26 @@ def sample_view(rng, T, fps, intr, anchor, scale, target=None, target_points=Non
             # consumers can recover the smooth path
             jparams = dict(jparams, applied_trans_rms_m=float(np.sqrt((dpos ** 2).sum(1).mean())),
                            applied_rot_rms_deg=float(np.degrees(np.sqrt((drot ** 2).sum(1).mean()))),
-                           pre_jitter_pos=np.round(pos0, 5), pre_jitter_forward=np.round(-R0[:, :, 2], 5))
+                           pre_jitter_pos=pos0, pre_jitter_forward=-R0[:, :, 2], pre_jitter_R_cw=R0)
         tp = target_points if target_points is not None else (target if pt in NEEDS_TARGET else None)
         ok, rep = validate_path(pos, R, intr, clearance_fn=clearance_fn, ray_fn=ray_fn,
                                 target=tp if pt in NEEDS_TARGET else None, **val_kw)
         tried.append(dict(path_type=pt, jitter=jit, **rep))
+        if ok and strict:
+            speed = np.linalg.norm(np.diff(pos, axis=0), axis=1) * fps
+            rot = np.swapaxes(R[:-1], 1, 2) @ R[1:]
+            omega = np.degrees(np.arccos(np.clip((np.trace(rot, axis1=1, axis2=2) - 1) / 2, -1, 1))) * fps
+            rep.update(max_speed_mps=float(speed.max(initial=0)), max_angular_speed_dps=float(omega.max(initial=0)))
+            # Jitter can contribute brief peaks. Large orbit sweeps in short clips are resampled.
+            if rep["max_speed_mps"] > 4.0 or rep["max_angular_speed_dps"] > 120:
+                tried[-1].update(rep, reason="camera_speed")
+                continue
         if ok:
             return dict(pos=pos, R=R, meta=dict(path_type=pt, params=_jsonable(params), jitter=jit,
                                                 jitter_params=_jsonable(jparams), attempts=attempt + 1,
                                                 validation=_jsonable(rep), rejected=tried[:-1]))
+    if strict:
+        raise ValueError(f"no valid {path_type} camera after {max_tries} attempts: {tried[-1]}")
     pos, R, params = path_static(rng, T, np.asarray(anchor, np.float64), target, scale, fps=fps)
     ok, rep = validate_path(pos, R, intr, clearance_fn=clearance_fn, ray_fn=ray_fn, **val_kw)
     return dict(pos=pos, R=R, meta=dict(path_type="static", params=_jsonable(params), jitter=False, jitter_params=None,

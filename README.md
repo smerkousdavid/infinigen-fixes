@@ -35,6 +35,9 @@ tracks for point-tracking and 4D-reconstruction training. Upstream files change 
    an `INFINIGEN_DISABLE_SLURM=1` switch.
 
 ### Features (`src/infinigen/p4d/`)
+
+See [the Point4D pilot guide](docs/Point4DPilot.md) for calibrated cameras, explicit
+physics impulses, measured overlap curriculum, acceptance gates and pilot commands.
 - **`cameras.py`: 4 synchronized cameras per scene.** Each view gets an independent path type: orbit, spin, crane,
   dolly, follow-object, handheld or near-static.
   - About 25 % of views get Ornstein-Uhlenbeck jitter on translation (1-4 cm) and rotation (0.3-1.5°), plus a
@@ -44,13 +47,13 @@ tracks for point-tracking and 4D-reconstruction training. Upstream files change 
   - Unit tests: `tests/p4d/test_cameras.py`.
 - **`motion/creatures.py`: walking creatures.** Upstream `populate_all` re-created creature factories without the
   coarse-stage `animation_mode`, so creatures were never rigged. With this, herbivores and carnivores use the
-  run gait on terrain walks, and a vertex-motion gate checks that they move.
+  distance-phased walk/run gaits on terrain paths. Evaluated foot contacts and nonrigid vertex motion are checked.
 - **`motion/wind.py`: wind on vegetation.** A geometry-nodes wind (height-weighted sway, a shared gust field and
   leaf flutter) on trees, bushes, grass and scatter sources. Topology stays constant.
 - **`motion/objects.py`: indoor rigid-body motion.** Bullet rigid-body drops, tosses, slides and rolling balls,
   plus keyframed pushed chairs.
-- **`motion/articulation.py`: articulated Infinigen-Sim assets in v2 rooms.** Assets such as cabinet, drawer,
-  dishwasher, refrigerator and door are placed against walls, and every joint is animated with an independent
+- **`motion/articulation.py`: articulated Infinigen-Sim assets in v2 rooms.** Cabinets and drawers
+  replace static storage against walls, and every joint is animated with an independent
   profile: open, close, partial, open-close or repeated.
 - **`gt.py`: multi-view render and point tracks.** V-view Cycles render: RGB, z-depth, normals, object index and
   Vector flow. It also runs a unified mesh-surface point tracker that produces one world-track bank shared by
@@ -68,7 +71,7 @@ tracks for point-tracking and 4D-reconstruction training. Upstream files change 
 ```bash
 bash scripts/p4d/install_pod.sh        # fork install on a Linux x86 GPU box (no patches needed)
 python -m infinigen.p4d.run_scene --family indoor_physics --seed 0 --out outputs/p4d/phys0
-python -m infinigen.p4d.batch --plan plan.txt --out outputs/p4d/batch --jobs 3
+python -m infinigen.p4d.batch --plan scripts/p4d/configs/pilot.txt --out outputs/p4d/pilot --jobs 1
 ```
 
 ## Getting Started

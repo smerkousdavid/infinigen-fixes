@@ -59,6 +59,10 @@ def build_group():
     _new_socket(ng, "Direction", "INPUT", "NodeSocketVector", (1.0, 0.0, 0.0))
     N, L = ng.nodes, ng.links
     gi, go = N.new("NodeGroupInput"), N.new("NodeGroupOutput")
+    self_object = N.new("GeometryNodeSelfObject")
+    object_info = N.new("GeometryNodeObjectInfo")
+    object_info.transform_space = "ORIGINAL"
+    L.new(self_object.outputs["Self Object"], object_info.inputs["Object"])
 
     def math_(op, a=None, b=None, c=None):
         n = N.new("ShaderNodeMath")
@@ -96,7 +100,14 @@ def build_group():
         h = math_("DIVIDE", math_("SUBTRACT", sep.outputs["Z"], gi.outputs["ZMin"]), gi.outputs["Height"])
         h = math_("POWER", math_("MINIMUM", math_("MAXIMUM", h, 0.0), 1.0), 1.5)
         t = N.new("GeometryNodeInputSceneTime").outputs["Seconds"]
-        wave = math_("MULTIPLY", math_("ADD", sep.outputs["X"], sep.outputs["Y"]), gi.outputs["Wave"])
+        rotated = N.new("ShaderNodeVectorRotate")
+        rotated.rotation_type = "EULER_XYZ"
+        L.new(vmath("MULTIPLY", domain_pos, object_info.outputs["Scale"]), rotated.inputs["Vector"])
+        L.new(object_info.outputs["Rotation"], rotated.inputs["Rotation"])
+        world_pos = vmath("ADD", rotated.outputs["Vector"], object_info.outputs["Location"])
+        world_sep = N.new("ShaderNodeSeparateXYZ")
+        L.new(world_pos, world_sep.inputs[0])
+        wave = math_("MULTIPLY", math_("ADD", world_sep.outputs["X"], world_sep.outputs["Y"]), gi.outputs["Wave"])
         ph = math_("ADD", math_("ADD", math_("MULTIPLY", math_("MULTIPLY", t, gi.outputs["Freq"]), 2 * math.pi),
                                     gi.outputs["Phase"]), wave)
         sway = math_("ADD", math_("SINE", ph), math_("MULTIPLY", math_("SINE", math_("ADD", math_("MULTIPLY", ph, 2.3),
@@ -104,8 +115,8 @@ def build_group():
         nz = N.new("ShaderNodeTexNoise")
         nz.noise_dimensions = "4D"
         nz.inputs["Scale"].default_value = 1.0
-        L.new(vmath("SCALE", domain_pos, scale=0.05), nz.inputs["Vector"])
-        L.new(math_("ADD", math_("MULTIPLY", t, 0.25), gi.outputs["Phase"]), nz.inputs["W"])
+        L.new(vmath("SCALE", world_pos, scale=0.05), nz.inputs["Vector"])
+        L.new(math_("MULTIPLY", t, 0.25), nz.inputs["W"])
         gust = math_("MULTIPLY", math_("SUBTRACT", nz.outputs["Fac"], 0.5), 2.0)
         amp = math_("MULTIPLY", math_("MULTIPLY", math_("MULTIPLY", gi.outputs["Strength"], gi.outputs["Height"]), h),
                     math_("ADD", sway, math_("MULTIPLY", gust, gi.outputs["Gust"])))
@@ -169,10 +180,10 @@ def apply_wind(objects, strength=0.04, gust=0.5, flutter=0.0, freq=0.4, directio
         if o.type != "MESH" or any(m.name == "p4d_wind" for m in o.modifiers):
             continue
         z0, h = _local_bbox_z(o)
-        rot = o.matrix_world.to_3x3().normalized()
-        d = (rot.inverted() @ wdir).normalized()
+        transform = o.matrix_world.to_3x3()
+        d = transform.inverted() @ wdir
         k = 0.25 if STIFF.search(o.name) else 1.0
-        prm = dict(Strength=strength * k, ZMin=z0, Height=h, Phase=float(rng.uniform(0, 2 * math.pi)),
+        prm = dict(Strength=strength * k * transform.col[2].length, ZMin=z0, Height=h, Phase=float(rng.uniform(0, 2 * math.pi)),
                    Freq=freq * float(rng.uniform(0.8, 1.25)), Gust=gust, Flutter=flutter * k, Wave=0.3)
         m = o.modifiers.new("p4d_wind", "NODES")
         m.node_group = ng
@@ -186,7 +197,7 @@ def apply_wind(objects, strength=0.04, gust=0.5, flutter=0.0, freq=0.4, directio
         o["p4d_kind"] = "wind"
         done[o.name] = dict(prm, direction=(d.x, d.y, d.z))
     logger.info(f"p4d wind on {len(done)} objects (strength={strength}, gust={gust}, flutter={flutter})")
-    return dict(direction_deg=math.degrees(yaw), n_objects=len(done), objects=list(done)[:200],
+    return dict(direction_deg=math.degrees(yaw), field_frame="world", n_objects=len(done), objects=list(done)[:200],
                 strength=strength, gust=gust, flutter=flutter)
 
 
