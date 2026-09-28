@@ -860,7 +860,7 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
 @gin.configurable
 def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_dir=None, samples=128,
                      wind_strength=0.0, wind_gust=0.5, wind_flutter=0.0, wind_scatters=True, n_mesh=10000,
-                     n_inst=3000, n_static=6000, **_):
+                     n_inst=3000, n_static=6000, render_tiers=None, **_):
     """render.render_image_func replacement: renders ALL camera rigs (subcam 0) + unified tracks."""
     import bpy
 
@@ -891,6 +891,10 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
             o["p4d_kind"] = "wind"
     out = Path(out_dir) if out_dir else Path(frames_folder) / "p4d"
     tiers = list(dict.fromkeys(v.get("overlap_target", "none") for v in views))
+    if render_tiers:
+        if set(render_tiers) - set(tiers):
+            raise ValueError(f"requested render tiers are missing from the prepared rig: {render_tiers}")
+        tiers = [tier for tier in tiers if tier in render_tiers]
     results = []
     for tier in tiers:
         indices = [i for i, v in enumerate(views) if v.get("overlap_target", "none") == tier]

@@ -21,6 +21,11 @@ rebuilding motion and cameras; the new run records that source path.
 `--reuse-coarse PATH` reuses a successful nature coarse stage. Both record source
 configuration and artifact checksums. `batch --collect-only` converts and validates
 completed raw clips without running generation again.
+`--reuse-fine PATH` reuses all three successful nature geometry stages.
+`--render-tiers medium low` renders selected tiers from the complete saved rig;
+geometry and camera paths stay tied to the recorded prepared scene. This supports
+bounded pod sessions without discarding completed tiers. Collection still requires
+all three tiers and their independent acceptance checks.
 
 When deploying source without Git metadata, run `scripts/p4d/stamp_source.py` from
 a clean checkout and copy the generated `source_manifest.json` with the package.
@@ -59,6 +64,10 @@ so particle segmentation is at source-template granularity; tracks retain separa
 temporal identities. Particle samples receive a separate quota so dense vegetation
 cannot consume their entire track budget. Changing tracked connectivity fails
 before rendering, and unique segmentation IDs must fit Blender's pass-index range.
+Creature trajectories are separated using evaluated actor bounds across every
+frame, followed by terrain contact rebinding and a second actor-clearance check.
+`python -m infinigen.p4d.prepare_creatures --source SCENE --out PREPARED` saves this
+validated motion into a copied fine-stage checkpoint with artifact checksums.
 
 ## Overlap curriculum
 

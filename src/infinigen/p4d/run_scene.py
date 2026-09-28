@@ -104,6 +104,8 @@ def run_nature(a, out):
                    f"p4d_render_image.seed={a.seed}", f"p4d_render_image.out_dir='{raw}'",
                    f"p4d_render_image.samples={a.samples}", f"p4d_render_image.wind_strength={wind}",
                    f"p4d_render_image.wind_flutter={flutter}", "p4d_render_image.wind_gust=0.6"]
+    if a.render_tiers:
+        render_over.append(f"p4d_render_image.render_tiers={a.render_tiers!r}")
     stages = [
         ("coarse", ["--task", "coarse", "--output_folder", str(out / "coarse")], []),
         ("populate", ["--task", "populate", "--input_folder", str(out / "coarse"),
@@ -504,6 +506,8 @@ def export_indoor_variants(a, out, variants, motion, timing):
 
     clips = []
     for tier, cams, metas in variants:
+        if a.render_tiers and tier not in a.render_tiers:
+            continue
         name = raw_name(a) + ("_" + tier if tier != "none" else "")
         completed = out / name / "scene_meta.json"
         if a.resume and completed.exists():
@@ -532,6 +536,8 @@ def main():
     ap.add_argument("--reuse-prepared", type=Path, help="reuse baked indoor motion/rigs with recorded artifact provenance")
     ap.add_argument("--reuse-coarse", type=Path, help="reuse a successful nature coarse stage with recorded provenance")
     ap.add_argument("--reuse-fine", type=Path, help="reuse successful nature coarse/populate/fine stages with recorded provenance")
+    ap.add_argument("--render-tiers", nargs="+", choices=("high", "medium", "low"),
+                    help="render only selected tiers from the prepared scene, retaining its complete camera rig")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--views", type=int, default=4)
@@ -546,6 +552,8 @@ def main():
         ap.error("--reuse-coarse requires a nature family")
     if a.reuse_fine and (not a.family.startswith("nature") or a.reuse_coarse):
         ap.error("--reuse-fine requires a nature family and cannot combine with --reuse-coarse")
+    if a.render_tiers and a.overlap != "all" and set(a.render_tiers) != {a.overlap}:
+        ap.error("--render-tiers must be a subset of the prepared --overlap tiers")
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(name)s] %(message)s", datefmt="%H:%M:%S")
     a.out.mkdir(parents=True, exist_ok=True)
     config_path = a.out / "resolved_config.json"
