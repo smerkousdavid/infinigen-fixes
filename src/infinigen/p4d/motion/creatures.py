@@ -395,6 +395,10 @@ def vertex_motion_report(objects, frames, depsgraph=None):
                 not np.array_equal(tr, topologies[name][0]) for tr in topologies[name]):
             rep[name] = {"topology_constant": False}
             continue
+        if len(s[0]) == 0:
+            rep[name] = {"topology_constant": True, "n_verts": 0,
+                         "geometry": "empty mesh; instances are checked by the instance tracker"}
+            continue
         # max over all checked frames (profiles like open-then-close return to the start pose)
         d = np.max([np.linalg.norm(x - s[0], axis=1) for x in s[1:]], axis=0)
         # Remove best-fitting rigid rotation AND translation; turning is not a gait.

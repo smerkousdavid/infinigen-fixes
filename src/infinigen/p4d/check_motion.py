@@ -15,6 +15,13 @@ def run(out):
     scene = bpy.context.scene
     scene.frame_start, scene.frame_end, scene.render.fps = 1, 48, 24
     report = {}
+    from infinigen.p4d.motion.creatures import vertex_motion_report
+    empty = bpy.data.objects.new("empty_instancer", bpy.data.meshes.new("empty_mesh"))
+    scene.collection.objects.link(empty)
+    empty_report = vertex_motion_report([empty], [1, 2])[empty.name]
+    assert empty_report["n_verts"] == 0 and "max_local_deform_m" not in empty_report
+    report["empty_instancer"] = empty_report
+    bpy.data.objects.remove(empty, do_unlink=True)
     for name in ("cabinet", "drawer"):
         obj = A.spawn_asset(name, 42)
         joints = A.animate_joints(np.random.default_rng(1), obj, 1, 48, profiles=["open"])

@@ -716,7 +716,8 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
         for gait in motion["gaits"].values():
             gait["evaluated_contacts"] = evaluate_contacts(gait, frames, bvh=ground)
     if vertex_check:
-        chk = [o for o in dyn if kinds[o.pass_index] in ("creature", "wind", "articulated", "deform")]
+        chk = [o for o in dyn if kinds[o.pass_index] in ("creature", "wind", "articulated", "deform")
+               and o.name in tracker.report["objects"]]
         chk = sorted(chk, key=lambda o: -tracker.report["objects"].get(o.name, {}).get("n", 0))[:60]
         motion["vertex_motion"] = vertex_motion_report(chk, sorted({fs, fs + (fe - fs) // 4, (fs + fe) // 2,
                                                                      fs + 3 * (fe - fs) // 4, fe}))
