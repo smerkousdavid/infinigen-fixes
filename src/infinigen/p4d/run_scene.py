@@ -120,11 +120,13 @@ def run_nature(a, out):
     env = dict(os.environ, INFINIGEN_DISABLE_SLURM="1")
     previous = json.loads((out / "run.json").read_text()) if a.resume and (out / "run.json").exists() else {}
     for name, args, extra_p in stages:
+        if name == 'render_gt' and a.prepare_only:
+            return dict(status='prepared', tracks={'n': 0})
         cmd = drv + base[:] + args + ["-p", *over, *extra_p]
         done = previous.get("stages", {}).get(name, {})
         stage_out = Path(args[args.index("--output_folder") + 1])
-        if a.reuse_fine and name != "render_gt":
-            source = a.reuse_fine
+        if (a.reuse_fine and name != "render_gt") or (a.reuse_populated and name in ('coarse', 'populate')):
+            source = a.reuse_fine or a.reuse_populated
             recorded = json.loads((source / "resolved_config.json").read_text())
             for key in ("family", "seed", "frames", "fps", "width", "height", "views", "overlap", "nature_config"):
                 if recorded[key] != getattr(a, key):
@@ -536,6 +538,8 @@ def main():
     ap.add_argument("--reuse-prepared", type=Path, help="reuse baked indoor motion/rigs with recorded artifact provenance")
     ap.add_argument("--reuse-coarse", type=Path, help="reuse a successful nature coarse stage with recorded provenance")
     ap.add_argument("--reuse-fine", type=Path, help="reuse successful nature coarse/populate/fine stages with recorded provenance")
+    ap.add_argument('--reuse-populated', type=Path, help='reuse nature assets, regenerating fine terrain for updated cameras')
+    ap.add_argument('--prepare-only', action='store_true', help='finish nature geometry stages without rendering')
     ap.add_argument("--render-tiers", nargs="+", choices=("high", "medium", "low"),
                     help="render only selected tiers from the prepared scene, retaining its complete camera rig")
     ap.add_argument("--width", type=int, default=640)
@@ -552,6 +556,10 @@ def main():
         ap.error("--reuse-coarse requires a nature family")
     if a.reuse_fine and (not a.family.startswith("nature") or a.reuse_coarse):
         ap.error("--reuse-fine requires a nature family and cannot combine with --reuse-coarse")
+    if a.reuse_populated and (not a.family.startswith('nature') or a.reuse_fine or a.reuse_coarse):
+        ap.error('--reuse-populated requires a nature family and cannot combine with other nature reuse options')
+    if a.prepare_only and not a.family.startswith('nature'):
+        ap.error('--prepare-only currently requires a nature family')
     if a.render_tiers and a.overlap != "all" and set(a.render_tiers) != {a.overlap}:
         ap.error("--render-tiers must be a subset of the prepared --overlap tiers")
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(name)s] %(message)s", datefmt="%H:%M:%S")
@@ -566,7 +574,10 @@ def main():
         meta = run_nature(a, a.out)
     else:
         meta = run_indoor(a, a.out)
-    logger.info(f"DONE {a.family} seed {a.seed} in {time.time() - t0:.0f}s: {meta['tracks']['n']} tracks")
+    if meta.get('status') == 'prepared':
+        logger.info('PREPARED %s seed %d in %.0fs; no dataset clips rendered', a.family, a.seed, time.time() - t0)
+    else:
+        logger.info(f"DONE {a.family} seed {a.seed} in {time.time() - t0:.0f}s: {meta['tracks']['n']} tracks")
 
 
 if __name__ == "__main__":

@@ -81,7 +81,7 @@ def run(source, out):
     rigs = get_camera_rigs()
     if len(rigs) != 12:
         raise ValueError('prepared scene must have all twelve cameras')
-    records = []
+    records, authored = [], []
     for k, tier in enumerate(TIERS):
         group = rigs[4*k:4*k+4]
         intrinsics = []
@@ -107,6 +107,7 @@ def run(source, out):
                         target_world=targets[i].tolist())
             rig['p4d_view'] = json.dumps(meta)
             records.append(meta)
+            authored.append((rig.name, view['pos'], view['R'], meta))
         print(json.dumps(dict(tier=tier, preview_overlap=sampled[0]['meta']['preview_overlap'])), flush=True)
     scene['p4d_views'] = json.dumps(records)
     bpy.ops.wm.save_as_mainfile(filepath=str(blend))
@@ -114,7 +115,28 @@ def run(source, out):
                   output_sha256=hashlib.sha256(blend.read_bytes()).hexdigest(),
                   source_identity=source_identity(), seconds=time.time()-start,
                   target_tree=trees[order[0]].name, target_world=centre.tolist(), views=records)
-    stages['stages']['fine_terrain']['camera_postprocess'] = report
+    # Fine terrain is camera-dependent. Update upstream scene rigs and require
+    # remeshing before any final render uses this camera configuration.
+    for folder, stage in (('coarse', 'coarse'), ('populated', 'populate')):
+        path = out / folder / 'scene.blend'
+        original = hashlib.sha256(path.read_bytes()).hexdigest()
+        bpy.ops.wm.open_mainfile(filepath=str(path))
+        current = bpy.context.scene
+        for name, pos, R, meta in authored:
+            rig = bpy.data.objects[name]
+            C.blender_apply_path(rig, pos, R, frame_start=current.frame_start)
+            rig['p4d_view'] = json.dumps(meta)
+            cam = next(c for c in rig.children if c.type == 'CAMERA')
+            cam.data.lens, cam.data.sensor_width, cam.data.sensor_fit = 24., 36., 'HORIZONTAL'
+            cam.data.sensor_height = 36. * current.render.resolution_y / current.render.resolution_x
+        current['p4d_views'] = json.dumps(records)
+        bpy.ops.wm.save_as_mainfile(filepath=str(path))
+        stages['stages'][stage]['camera_postprocess'] = dict(
+            input_sha256=original, output_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            source_identity=source_identity(), prepared_camera_source=report)
+    stages['stages']['fine_terrain'] = dict(exit=None, status='requires_camera_dependent_remeshing',
+        source_stage=stages['stages']['fine_terrain'], camera_postprocess=report)
+    report['seconds'] = time.time() - start
     (out / 'run.json').write_text(json.dumps(stages, indent=2))
     (out / 'preparation.json').write_text(json.dumps(report, indent=2))
     print(json.dumps(dict(seconds=report['seconds'], target=report['target_tree'])), flush=True)

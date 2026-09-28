@@ -74,6 +74,10 @@ clearance. Prepared creature checkpoints explicitly repair buried paths and reco
 the translation and re-aiming. Wind rigs target populated vegetation; use
 `python -m infinigen.p4d.prepare_wind --source SCENE --out PREPARED` to reframe a
 saved wind scene around its actual trees before rendering.
+After reframing wind, run `run_scene --reuse-populated PREPARED --prepare-only`
+with the same family, seed and profile to regenerate camera-dependent fine terrain.
+The reframed checkpoint deliberately marks its old fine mesh stale. Review the
+new fine scene, then render it using `--reuse-fine`.
 
 ## Overlap curriculum
 
