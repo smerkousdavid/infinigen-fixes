@@ -203,6 +203,117 @@ def walk_placeholders(pois, T, fps, seed=0, frame_start=1, bvh=None):
     return infos
 
 
+def actor_bounds(roots, frames):
+    """Evaluated world bounds of each rendered actor, including all body parts."""
+    import bpy
+    from infinigen.p4d.gt import _chain, renderable
+    groups = {root.name: [obj for obj in bpy.context.scene.objects if obj.type == "MESH"
+                         and root in _chain(obj) and renderable(obj)] for root in roots}
+    bounds = {name: [] for name in groups}
+    for frame in frames:
+        bpy.context.scene.frame_set(frame)
+        dg = bpy.context.evaluated_depsgraph_get()
+        for name, objects in groups.items():
+            corners = []
+            for obj in objects:
+                evaluated = obj.evaluated_get(dg)
+                matrix = np.asarray(evaluated.matrix_world)
+                corners.extend(np.asarray(evaluated.bound_box) @ matrix[:3, :3].T + matrix[:3, 3])
+            corners = np.asarray(corners)
+            if not len(corners) or not np.isfinite(corners).all():
+                raise ValueError(f"missing actor geometry: {name}")
+            bounds[name].append([corners.min(0), corners.max(0)])
+    return {name: np.asarray(values) for name, values in bounds.items()}
+
+
+def minimum_xy_gap(a, b):
+    """Signed separation on the best horizontal axis, minimized over all frames."""
+    return float(np.maximum(a[:, 0, :2] - b[:, 1, :2], b[:, 0, :2] - a[:, 1, :2]).max(1).min())
+
+
+def separate_actor_paths(roots, frames, margin=.3, max_offset=4.):
+    """Translate whole trajectories until evaluated actor bounds stay separated.
+
+    Speed, turning and gait phase are preserved. World-space IK targets move
+    with the actor, and the caller then rebinds contact heights to final terrain.
+    """
+    import bpy
+    import json
+    from mathutils import Vector
+    bounds = actor_bounds(roots, frames)
+    placed, records = [], []
+    for root in roots:
+        original = bounds[root.name]
+        offset = np.zeros(3)
+        if any(minimum_xy_gap(original, other) < margin for other in placed):
+            found = False
+            for radius in np.arange(.05, max_offset + .025, .05):
+                for angle in np.linspace(0, 2*np.pi, 72, endpoint=False):
+                    candidate = np.array([radius*np.cos(angle), radius*np.sin(angle), 0.])
+                    shifted = original + candidate
+                    if all(minimum_xy_gap(shifted, other) >= margin for other in placed):
+                        offset, found = candidate, True
+                        break
+                if found:
+                    break
+            if not found:
+                raise ValueError(f"cannot separate creature trajectories within {max_offset}m: {root.name}")
+            owner = root.parent or root
+            gait = json.loads(root["p4d_gait_report"])
+            targets = [bpy.data.objects[f["target"]] for f in gait["feet"]]
+            for frame in frames:
+                bpy.context.scene.frame_set(frame)
+                owner.matrix_world.translation += Vector(offset)
+                owner.keyframe_insert("location", frame=frame)
+                for target in targets:
+                    target.matrix_world.translation += Vector(offset)
+                    target.keyframe_insert("location", frame=frame)
+            root["p4d_final_terrain_contacts"] = False
+        placed.append(original + offset)
+        records.append(dict(actor=root.name, translation_world_m=offset.tolist()))
+    bpy.context.scene.frame_set(frames[0])
+    return dict(method="constant world translation with evaluated bounds", margin_m=margin,
+                frames_checked=len(frames), actors=records)
+
+
+def actor_clearance_report(roots, frames):
+    bounds = actor_bounds(roots, frames)
+    names = list(bounds)
+    pairs = [dict(actors=[a, b], minimum_xy_gap_m=minimum_xy_gap(bounds[a], bounds[b]))
+             for i, a in enumerate(names) for b in names[i+1:]]
+    if any(pair["minimum_xy_gap_m"] < .05 for pair in pairs):
+        raise ValueError(f"creature trajectories are not separated after foot rebinding: {pairs}")
+    return dict(frames_checked=len(frames), pairs=pairs, geometry="evaluated actor bounds")
+
+
+def prepare_scene_contacts():
+    """Separate populated actors and validate their feet against final terrain."""
+    import bpy
+    import json
+    scene = bpy.context.scene
+    roots = sorted([obj for obj in scene.objects if obj.get("p4d_gait_report")], key=lambda obj: obj.name)
+    if not roots:
+        return {}
+    frames = list(range(scene.frame_start, scene.frame_end + 1))
+    if "p4d_actor_separation" not in scene:
+        scene["p4d_actor_separation"] = json.dumps(separate_actor_paths(roots, frames))
+    ground = terrain_bvh(render_only=True) if any(not obj.get("p4d_final_terrain_contacts") for obj in roots) else None
+    for obj in roots:
+        if not obj.get("p4d_final_terrain_contacts"):
+            gait = json.loads(obj["p4d_gait_report"])
+            if obj.get("p4d_contact_original_location") is not None:
+                obj.location = obj["p4d_contact_original_location"]
+            bake_contact_gait(obj, bpy.data.objects[gait["armature"]],
+                              [bpy.data.objects[foot["target"]] for foot in gait["feet"]], ground)
+            obj["p4d_final_terrain_contacts"] = True
+        contact = json.loads(obj["p4d_gait_report"])["evaluated_contacts"]
+        if (contact["endpoint_target_error_p95_m"] > .05 or contact["stance_step_slip_p95_m"] > .02
+                or contact["terrain_height_error_p95_m"] is None or contact["terrain_height_error_p95_m"] > .03):
+            raise ValueError(f"evaluated foot contacts failed before rendering: {obj.name}: {contact}")
+    return dict(actor_separation=json.loads(scene["p4d_actor_separation"]),
+                actor_clearance=actor_clearance_report(roots, frames))
+
+
 def bake_contact_gait(root, arma, targets, bvh):
     """Distance-phased IK gait with world-locked stance feet and terrain contacts.
 

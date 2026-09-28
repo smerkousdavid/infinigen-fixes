@@ -86,6 +86,10 @@ def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_
         return tracks.get("n_dynamic_visible", 0) >= 16 and flow.get("n", 0) >= 16 and flow.get("median_epe_px", float("inf")) <= 1.
     require(not scene.get("tracks", {}).get("report", {}).get("dropped_topology"), "tracked topology changed")
     if family == "nature_creatures":
+        clearance = scene["motion"].get("actor_clearance", {})
+        require(clearance.get("frames_checked") == scene["frames"] and clearance.get("pairs")
+                and all(pair.get("minimum_xy_gap_m", -1) >= .05 for pair in clearance["pairs"]),
+                "creature actors intersect or lack full-clip separation evidence")
         gaits = scene["motion"].get("gaits", {})
         require({g.get("gait") for g in gaits.values()} >= {"walk", "run"}, "walk and run gaits not both present")
         for actor, gait in gaits.items():

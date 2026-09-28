@@ -871,27 +871,13 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
     # Saved populated scenes may predate the body-height correction. Reuse the
     # rig and its exact world-space foot targets, then verify evaluated contacts.
     unhide_renderables()
-    from infinigen.p4d.motion.creatures import bake_contact_gait, terrain_bvh
-    has_gaits = any(o.get("p4d_gait_report") for o in s.objects)
-    ground = terrain_bvh(render_only=True) if has_gaits else None
-    for obj in list(s.objects):
-        if obj.get("p4d_gait_report") and not obj.get("p4d_final_terrain_contacts"):
-            gait = json.loads(obj["p4d_gait_report"])
-            if obj.get("p4d_contact_original_location") is not None:
-                obj.location = obj["p4d_contact_original_location"]
-            bake_contact_gait(obj, bpy.data.objects[gait["armature"]],
-                              [bpy.data.objects[f["target"]] for f in gait["feet"]], ground)
-            obj["p4d_final_terrain_contacts"] = True
-        if obj.get("p4d_gait_report"):
-            gait = json.loads(obj["p4d_gait_report"])
-            contact = gait["evaluated_contacts"]
-            if (contact["endpoint_target_error_p95_m"] > .05 or contact["stance_step_slip_p95_m"] > .02
-                    or contact["terrain_height_error_p95_m"] is None or contact["terrain_height_error_p95_m"] > .03):
-                raise ValueError(f"evaluated foot contacts failed before rendering: {obj.name}: {contact}")
+    from infinigen.p4d.motion.creatures import prepare_scene_contacts
+    contacts = prepare_scene_contacts()
     rigs = cam_util.get_camera_rigs()
     cams = [next(c for c in r.children if c.type == "CAMERA") for r in rigs]
     views = [json.loads(r["p4d_view"]) if "p4d_view" in r else {"path_type": "infinigen_default"} for r in rigs]
     motion = json.loads(s["p4d_motion"]) if "p4d_motion" in s else {}
+    motion.update(contacts)
     tw = time.time()
     wind_objs = set()
     if wind_strength > 0:
