@@ -17,6 +17,16 @@ The converter checkout defaults to `/root/point4d-datasets`.
 `--resume` requires matching recorded configuration and generator code. Indoor
 `--reuse-room PATH` reuses the saved, unanimated room with the same seed while
 rebuilding motion and cameras; the new run records that source path.
+`--reuse-prepared PATH` reuses a compatible indoor scene's baked motion and rigs;
+`--reuse-coarse PATH` reuses a successful nature coarse stage. Both record source
+configuration and artifact checksums. `batch --collect-only` converts and validates
+completed raw clips without running generation again.
+
+When deploying source without Git metadata, run `scripts/p4d/stamp_source.py` from
+a clean checkout and copy the generated `source_manifest.json` with the package.
+Each render records the verified source checksum and commit independently of the
+parent generation process. Set `P4D_CPU_THREADS` and `P4D_RENDER_THREADS` to share
+the container's actual CPU allocation between concurrent scenes.
 
 ## Geometry and motion
 
@@ -38,12 +48,17 @@ gravity and 20 simulation substeps per frame. Its poses are baked into Blender f
 both rendering and tracking. Chairs use collision-checked external actuation.
 Blender's native kinematic handoff was tested and reset the intended launch velocity.
 
-Creature feet use distance-phased walk/run contact targets; terrain contact and
-nonrigid mesh motion must be validated on the generated scene. Wind uses a shared
-world-space gust field. Particle tracks use parent/source/persistent IDs discovered
+Creature feet use distance-phased walk/run contact targets, rebound to the final
+rendered terrain. Body height is fitted against evaluated IK endpoints. Acceptance
+checks stance foot height, foot slip, nonrigid mesh motion, and visible tracks and
+flow separately for the walking and running actors. Wind uses a shared world-space
+gust field on unique geometry; repeated instances use a source-template field.
+Particle tracks use parent/source/persistent IDs discovered
 over the full clip. Cycles Object Index labels repeated instances by source template,
 so particle segmentation is at source-template granularity; tracks retain separate
-temporal identities. Invisible or unsupported topology is not fabricated.
+temporal identities. Particle samples receive a separate quota so dense vegetation
+cannot consume their entire track budget. Changing tracked connectivity fails
+before rendering, and unique segmentation IDs must fit Blender's pass-index range.
 
 ## Overlap curriculum
 
