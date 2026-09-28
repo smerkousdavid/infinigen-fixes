@@ -199,7 +199,11 @@ def path_spin(rng, T, anchor, target, scale, **kw):
         pos = np.broadcast_to(anchor, (T, 3)).copy()
         return pos, look_rotation(tgt - pos), dict(aim='target_tracking', translation='fixed')
     yaw_sweep = math.radians(kw.get("yaw_sweep_deg") or rng.uniform(30, 150)) * rng.choice([-1, 1])
-    pitch0 = math.radians(kw.get("pitch_deg") if kw.get("pitch_deg") is not None else rng.uniform(-20, 5))
+    pitch_deg = kw.get("pitch_deg")
+    if pitch_deg is None and target is not None:
+        direction = _target_at(target, T)[0] - anchor
+        pitch_deg = math.degrees(math.atan2(direction[2], np.linalg.norm(direction[:2])))
+    pitch0 = math.radians(pitch_deg if pitch_deg is not None else rng.uniform(-20, 5))
     pitch_amp = math.radians(kw.get('pitch_amp_deg', rng.uniform(0, 10)))
     if target is not None:
         d = _target_at(target, T)[0] - anchor
