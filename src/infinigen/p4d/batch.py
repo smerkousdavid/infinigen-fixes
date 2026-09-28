@@ -48,13 +48,16 @@ def run_one(fam, seed, a):
            "--fps", str(a.fps), "--samples", str(a.samples), "--overlap", a.overlap]
     if a.resume and (work / "resolved_config.json").exists():
         cmd.append("--resume")
-    with open(work / "run_scene.log", "a") as log:
-        r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=str(a.src))
+    exit_code = 0
+    if not a.collect_only:
+        with open(work / "run_scene.log", "a") as log:
+            exit_code = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, cwd=str(a.src)).returncode
     rec["generate_s"] = round(time.time() - rec["start"], 1)
     raws = sorted(p.parent for p in work.glob(name + "*/scene_meta.json"))
-    if r.returncode != 0 or len(raws) != (3 if a.overlap == "all" else 1):
-        rec.update(status="generate_failed", exit=r.returncode,
-                   log_tail=(work / "run_scene.log").read_text(errors="ignore")[-3000:])
+    if exit_code != 0 or len(raws) != (3 if a.overlap == "all" else 1):
+        log_path = work / "run_scene.log"
+        rec.update(status="generate_failed", exit=exit_code,
+                   log_tail=log_path.read_text(errors="ignore")[-3000:] if log_path.exists() else "raw clips incomplete")
         return _fail(a, name, rec)
     qa = a.out / "qa"
     qa.mkdir(exist_ok=True)
@@ -116,6 +119,7 @@ def main():
     ap.add_argument("--split", default="pilot_v02")
     ap.add_argument("--overlap", choices=("all", "high", "medium", "low"), default="all")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--collect-only", action="store_true", help="validate/package existing work scenes without regenerating")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--views", type=int, default=4)
