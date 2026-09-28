@@ -150,13 +150,16 @@ def class_hint(o):
 
 def assign_pass_indices(objects):
     """Unique pass_index 1..N per renderable object (0 = none/sky). -> {pass_index: info}."""
+    import bpy
+    maximum = bpy.types.Object.bl_rna.properties["pass_index"].hard_max
+    if len(objects) > maximum:
+        raise ValueError(f"too many objects for unique Blender pass indices: {len(objects)} > {maximum}")
     table = {}
     for i, o in enumerate(objects, start=1):
-        if i >= 65535:
-            logger.warning("more than 65534 renderable objects; the rest share index 65535")
-        o.pass_index = min(i, 65535)
+        o.pass_index = i
         table[int(o.pass_index)] = dict(name=o.name, factory=_factory(o), **{"class": class_hint(o)},
-                                        kind=object_kind(o))
+                                        kind=object_kind(o),
+                                        actor=next((a.name for a in _chain(o) if a.get("p4d_gait_report")), None))
     return table
 
 
@@ -647,7 +650,10 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
         obj = bpy.data.objects[instance["src"]]
         parent = bpy.data.objects[instance["parent"]]
         if obj.pass_index == 0 or table.get(obj.pass_index, {}).get("name") != obj.name:
-            obj.pass_index = max(table, default=0) + 1
+            index = max(table, default=0) + 1
+            if index > bpy.types.Object.bl_rna.properties["pass_index"].hard_max:
+                raise ValueError("instance source exceeds Blender's unique pass-index capacity")
+            obj.pass_index = index
             table[obj.pass_index] = dict(name=obj.name, factory=_factory(obj), **{"class": class_hint(obj)})
         kind = kinds[parent.pass_index]
         kinds[obj.pass_index] = kind

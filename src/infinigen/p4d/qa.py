@@ -88,7 +88,12 @@ def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_
     if family == "nature_creatures":
         gaits = scene["motion"].get("gaits", {})
         require({g.get("gait") for g in gaits.values()} >= {"walk", "run"}, "walk and run gaits not both present")
-        for gait in gaits.values():
+        for actor, gait in gaits.items():
+            evidence = quality.get("tracks_per_actor", {}).get(actor, {})
+            flow = quality.get("flow_dynamic_per_actor", {}).get(actor, {})
+            require(evidence.get("n_dynamic_visible", 0) >= 16 and flow.get("n", 0) >= 16
+                    and flow.get("median_epe_px", float("inf")) <= 1.,
+                    f"missing visible motion evidence for {gait.get('gait')} actor: {actor}")
             contact = gait.get("evaluated_contacts", {})
             require(contact.get("frames_checked") == scene["frames"] and contact.get("stance_samples", 0) > 0
                     and contact.get("stable_steps", 0) > 0
