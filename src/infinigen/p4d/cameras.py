@@ -192,6 +192,12 @@ def path_orbit(rng, T, anchor, target, scale, **kw):
 
 
 def path_spin(rng, T, anchor, target, scale, **kw):
+    if kw.get('track_target'):
+        tgt = _target_at(target, T)
+        if tgt is None:
+            raise ValueError('target-tracking pan requires a target')
+        pos = np.broadcast_to(anchor, (T, 3)).copy()
+        return pos, look_rotation(tgt - pos), dict(aim='target_tracking', translation='fixed')
     yaw_sweep = math.radians(kw.get("yaw_sweep_deg") or rng.uniform(30, 150)) * rng.choice([-1, 1])
     pitch0 = math.radians(kw.get("pitch_deg") if kw.get("pitch_deg") is not None else rng.uniform(-20, 5))
     pitch_amp = math.radians(rng.uniform(0, 10))
@@ -212,7 +218,7 @@ def path_spin(rng, T, anchor, target, scale, **kw):
 def path_crane(rng, T, anchor, target, scale, **kw):
     tgt = _target_at(target, T)
     dz = kw.get("dz") or float(rng.uniform(0.25, 0.7) * scale * rng.choice([-1, 1]))
-    drift = rng.normal(0, 0.1 * scale, 2)
+    drift = rng.normal(0, kw.get('drift_scale', .1) * scale, 2)
     s = smoothstep(np.linspace(0, 1, T))
     pos = np.broadcast_to(anchor, (T, 3)).copy()
     pos[:, 2] += dz * s
@@ -228,7 +234,7 @@ def path_dolly(rng, T, anchor, target, scale, **kw):
     s = smoothstep(np.linspace(0, 1, T))
     u = d0 / max(dist, 1e-9)
     side = np.cross(u, [0, 0, 1.0])
-    side_amt = rng.normal(0, 0.1) * dist
+    side_amt = rng.normal(0, kw.get('side_scale', .1)) * dist
     pos = anchor + np.outer(s * frac * dist, u) + np.outer(s * side_amt, side)
     return pos, look_rotation(tgt - pos), dict(frac=frac, dist0=float(dist), side=float(side_amt))
 

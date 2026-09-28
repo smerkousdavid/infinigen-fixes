@@ -67,6 +67,17 @@ def test_orbit_arc_and_radius():
     assert abs(abs(math.degrees((a1 - a0 + math.pi) % (2 * math.pi) - math.pi)) - 180) < 1.0
 
 
+def test_tracking_pan_keeps_moving_target_centered_without_translation():
+    target = np.stack([np.linspace(-2, 2, T), np.zeros(T), np.ones(T)], -1)
+    anchor = np.array([0., -5., 2.])
+    pos, R, _ = cams.path_spin(np.random.default_rng(0), T, anchor, target, 5., track_target=True)
+    uv, z = cams.project(target[:, None], pos, R, INTR)
+    assert np.allclose(pos, anchor)
+    assert (z > 0).all()
+    assert np.allclose(uv, [INTR.cx, INTR.cy])
+    assert not np.allclose(R[0], R[-1])
+
+
 def test_extrinsics_are_opencv():
     pos = np.array([[0.0, -5.0, 1.0]])
     R = cams.look_rotation(np.array([[0.0, 1.0, 0.0]]))  # looking +y

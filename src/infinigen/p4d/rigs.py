@@ -50,7 +50,9 @@ def sample_rig(rng, T, fps, intrinsics, anchor_fn, target, tier, clearance_fn, r
         raise ValueError("a curriculum rig requires a tier and four cameras")
     target = C._target_at(target, T)
     # High-overlap paths share an action, but still have independent motion.
-    pool = ("static", "crane", "dolly", "follow") if tier == "high" else C.PATH_TYPES
+    # A fixed aim loses overlap as the action crosses the frame. An in-place
+    # tracking pan keeps its distinct path while following the shared action.
+    pool = ("spin", "crane", "dolly", "follow") if tier == "high" else C.PATH_TYPES
     types = list(rng.choice(pool, 4, replace=False))
     jitter_view = int(rng.integers(4))
     last = None
@@ -70,6 +72,9 @@ def sample_rig(rng, T, fps, intrinsics, anchor_fn, target, tier, clearance_fn, r
                     anchor = anchor0
                 dist = max(1., np.linalg.norm(anchor - tgt[0]))
                 kwargs = dict(dz=.08 if tier == "high" else .25,
+                              track_target=tier == 'high',
+                              drift_scale=.01 if tier == 'high' else .1,
+                              side_scale=.01 if tier == 'high' else .1,
                               frac=.04 if tier == "high" else .12,
                               speed=.025 if tier == "high" else .08,
                               arc_deg=float(rng.uniform(4, 12)),

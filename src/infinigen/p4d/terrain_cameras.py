@@ -3,6 +3,61 @@ import json
 import numpy as np
 
 
+def reaim_creature_high():
+    """Keep prepared trajectories, aiming all high views at evaluated actors.
+
+    A formerly fixed-aim near-static view becomes a tracking pan. Original
+    jitter is retained as a local rotation relative to the newly authored aim.
+    Geometry, actor motion, medium cameras and low cameras are untouched.
+    """
+    import bpy
+    from infinigen.core.placement.camera import get_camera_rigs
+    from infinigen.p4d import cameras as C
+    from infinigen.p4d.motion.creatures import actor_bounds
+    scene = bpy.context.scene
+    frames = list(range(scene.frame_start, scene.frame_end + 1))
+    roots = [o for o in scene.objects if o.get('p4d_gait_report')]
+    bounds = actor_bounds(roots, frames)
+    target = np.mean([value.mean(1) for value in bounds.values()], axis=0)
+    rigs = get_camera_rigs()
+    selected = [r for r in rigs if json.loads(r['p4d_view']).get('overlap_target') == 'high']
+    matrices = []
+    for frame in frames:
+        scene.frame_set(frame)
+        dg = bpy.context.evaluated_depsgraph_get()
+        matrices.append([np.asarray(next(c for c in r.children if c.type == 'CAMERA').evaluated_get(dg).matrix_world)
+                         for r in selected])
+    matrices = np.asarray(matrices)
+    records = []
+    for i, rig in enumerate(selected):
+        cam = next(c for c in rig.children if c.type == 'CAMERA')
+        if rig.parent is not None or not np.allclose(cam.matrix_local, np.eye(4), atol=1e-6):
+            raise ValueError('re-aim requires an unparented rig and identity camera child')
+        meta = json.loads(rig['p4d_view'])
+        pos, old_R = matrices[:, i, :3, 3], matrices[:, i, :3, :3]
+        jitter = meta.get('jitter_params') if meta.get('jitter') else None
+        if jitter:
+            base_pos = np.asarray(jitter['pre_jitter_pos'])
+            noise = np.swapaxes(np.asarray(jitter['pre_jitter_R_cw']), 1, 2) @ old_R
+            base_R = C.look_rotation(target - base_pos)
+            R = base_R @ noise
+            jitter['pre_jitter_R_cw'] = base_R.tolist()
+        else:
+            R = C.look_rotation(target - pos)
+        C.blender_apply_path(rig, pos, R, frame_start=frames[0])
+        record = dict(camera=cam.name, previous_path_type=meta['path_type'],
+                      aim='evaluated creature group centre', translation_unchanged=True)
+        if meta['path_type'] == 'static':
+            meta['path_type'] = 'spin'
+        meta['params']['aim'] = 'evaluated creature group centre'
+        meta['high_reaim'] = record
+        meta['target_world'] = target.tolist()
+        rig['p4d_view'] = json.dumps(meta)
+        records.append(record)
+    scene['p4d_views'] = json.dumps([json.loads(r['p4d_view']) for r in rigs])
+    return dict(frames_checked=len(frames), cameras=records)
+
+
 def heights_above_terrain(points, bvh):
     from mathutils import Vector
     result = []

@@ -78,6 +78,14 @@ After reframing wind, run `run_scene --reuse-populated PREPARED --prepare-only`
 with the same family, seed and profile to regenerate camera-dependent fine terrain.
 The reframed checkpoint deliberately marks its old fine mesh stale. Review the
 new fine scene, then render it using `--reuse-fine`.
+Before a long nature render, run `python -m infinigen.p4d.check_overlap --source
+PREPARED --out CHECKS` with the converter repository available. This renders the
+first, middle and final frames at final resolution and measures actual surface
+overlap. It is an early rejection check; final acceptance still measures all
+96 frames at the production sample count. High rigs use a target-tracking pan
+instead of a fixed aim that can lose moving actors. For existing creature scenes,
+`prepare_creatures --reaim-high` explicitly re-aims the high rig while preserving
+its translations and authored jitter; check its rendered overlap before reuse.
 
 ## Overlap curriculum
 
