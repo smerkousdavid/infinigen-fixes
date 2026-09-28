@@ -112,8 +112,14 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
         if len(cam_rigs) != 4 * len(tiers):
             raise ValueError(f"expected {4 * len(tiers)} camera rigs, got {len(cam_rigs)}")
         if moving:
-            target_name = next(iter(moving))
-            target = moving[target_name] + [0, 0, .6]
+            from infinigen.p4d.motion.objects import world_bbox
+            scene.frame_set(fs)
+            heights = {o.name: float(np.ptp(np.array(world_bbox(o)), axis=0)[2])
+                       for o in pois if o.name in moving}
+            actor_targets = {name: path + [0, 0, .25 * heights[name]] for name, path in moving.items()}
+            target_name = "creature_group_center"
+            target = np.mean(list(actor_targets.values()), axis=0)
+            minimum_radius = max(7., 1.8 * max(heights.values()))
         else:
             anchor, rot = anchors[0]
             forward = np.array(_euler_to_forward(rot))
@@ -126,7 +132,8 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
 
         def anchor_fn(rng):
             for _ in range(200):
-                az, radius = rng.uniform(-np.pi, np.pi), rng.uniform(3, 8)
+                az = rng.uniform(-np.pi, np.pi)
+                radius = rng.uniform(minimum_radius, minimum_radius + 5) if moving else rng.uniform(3, 8)
                 xy = target[0, :2] + radius * np.array([np.cos(az), np.sin(az)])
                 gz = ground_z(*xy)
                 if gz is None:
@@ -141,7 +148,7 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
             rng = np.random.default_rng(np.random.SeedSequence([P4D["seed"], TIERS.index(tier), 193]))
             rigs = cam_rigs[k * 4:(k + 1) * 4]
             intrs = []
-            lens = float(rng.choice([24, 35, 50]))
+            lens = float(rng.choice([24, 35] if moving else [24, 35, 50]))
             for rig in rigs:
                 cam = rig.children[0]
                 cam.data.lens, cam.data.sensor_width, cam.data.sensor_fit = lens, 36., "HORIZONTAL"
@@ -158,7 +165,7 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
                 for i, offset in enumerate(([6, 0, 0], [-6, 0, 0], [0, 6, 0], [0, -6, 0])):
                     if i < len(moving):
                         name = list(moving)[i]
-                        region = moving[name] + [0, 0, .6]
+                        region = actor_targets[name]
                     else:
                         centre = target[0] + offset
                         gz = ground_z(*centre[:2])
