@@ -502,6 +502,16 @@ class Tracker:
             for it in self.inst:
                 n = len(it["ti"])
                 M = mats.get(it["key"])
+                normal_matrix = None
+                if M is not None:
+                    try:
+                        normal_matrix = np.linalg.inv(M[:3, :3])
+                    except np.linalg.LinAlgError:
+                        # Zero-scale procedural instances have no surface at
+                        # this frame (the same unavailable state as an absent
+                        # particle), and cannot provide a surface normal.
+                        self.report["degenerate_instance_frames"] = self.report.get("degenerate_instance_frames", 0) + 1
+                        M = None
                 if M is None:
                     X.append(np.full((n, 3), np.nan))
                     Nn.append(np.full((n, 3), np.nan))
@@ -513,7 +523,7 @@ class Tracker:
                     raise ValueError(f"instance source changes topology: {it['src']}")
                 x, nn = eval_points(co, tri, it["ti"], it["bary"])
                 X.append(x @ M[:3, :3].T + M[:3, 3])
-                nw = nn @ np.linalg.inv(M[:3, :3])  # normals transform with inverse-transpose
+                nw = nn @ normal_matrix  # normals transform with inverse-transpose
                 Nn.append(nw / np.maximum(np.linalg.norm(nw, axis=1, keepdims=True), 1e-12))
         self.xyz.append(np.concatenate(X) if X else np.zeros((0, 3)))
         self.nrm.append(np.concatenate(Nn) if Nn else np.zeros((0, 3)))
