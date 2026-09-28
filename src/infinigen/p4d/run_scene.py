@@ -327,6 +327,21 @@ def run_indoor(a, out):
     from infinigen.p4d.motion import articulation, objects as P
 
     cache = out / "prepared.json"
+    if a.reuse_prepared:
+        source = a.reuse_prepared
+        recorded = json.loads((source / "resolved_config.json").read_text())
+        for key in ("family", "seed", "frames", "fps", "width", "height", "views", "overlap"):
+            if recorded[key] != getattr(a, key):
+                raise ValueError(f"prepared scene has incompatible {key}: {recorded[key]}")
+        data = json.loads((source / "prepared.json").read_text())
+        blend = source / "prepared.blend"
+        bpy.ops.wm.open_mainfile(filepath=str(blend))
+        data["motion"]["prepared_source"] = dict(path=str(source),
+            blend_sha256=hashlib.sha256(blend.read_bytes()).hexdigest(), configuration=recorded)
+        variants = [(v["tier"], [bpy.data.objects[n] for n in v["cameras"]], v["metas"]) for v in data["variants"]]
+        bpy.ops.wm.save_as_mainfile(filepath=str(out / "prepared.blend"))
+        cache.write_text(json.dumps(data, indent=1))
+        return export_indoor_variants(a, out, variants, data["motion"], data["timing"])
     if a.resume and cache.exists() and (out / "prepared.blend").exists():
         data = json.loads(cache.read_text())
         bpy.ops.wm.open_mainfile(filepath=str(out / "prepared.blend"))
@@ -478,6 +493,7 @@ def main():
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--nature-config", choices=("desert.gin", "plain.gin", "forest.gin"))
     ap.add_argument("--reuse-room", type=Path, help="reuse a saved furnished room of the same seed")
+    ap.add_argument("--reuse-prepared", type=Path, help="reuse baked indoor motion/rigs with recorded artifact provenance")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--views", type=int, default=4)
@@ -486,6 +502,8 @@ def main():
     a = ap.parse_args()
     if a.overlap != "none" and a.views != 4:
         ap.error("overlap curriculum requires four cameras per clip")
+    if a.reuse_prepared and (a.family.startswith("nature") or a.reuse_room):
+        ap.error("--reuse-prepared requires an indoor family and cannot combine with --reuse-room")
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(name)s] %(message)s", datefmt="%H:%M:%S")
     a.out.mkdir(parents=True, exist_ok=True)
     config_path = a.out / "resolved_config.json"
