@@ -327,22 +327,30 @@ def setup_render(samples=128, device="OPTIX", width=None, height=None):
     return fo, s.cycles.device, prefs.compute_device_type
 
 
+def evaluated_camera_matrices(cam, scene, depsgraph):
+    """Calibration at the current evaluated frame, without advancing the scene."""
+    from infinigen.p4d.cameras import Intrinsics
+
+    K = Intrinsics.from_camera(cam, scene, depsgraph).K()
+    M = np.array(cam.evaluated_get(depsgraph).matrix_world) @ np.diag([1.0, -1, -1, 1])
+    # Camera scale is not part of a Euclidean world-to-camera pose.
+    M[:3, :3] /= np.linalg.norm(M[:3, :3], axis=0)
+    if not np.allclose(M[:3, :3].T @ M[:3, :3], np.eye(3), atol=1e-6) or np.linalg.det(M[:3, :3]) < 0:
+        raise ValueError("camera transform contains shear or reflection")
+    return K, np.linalg.inv(M)
+
+
 def camera_matrices(cam, frames):
     import bpy
-    from infinigen.p4d.cameras import Intrinsics
 
     s = bpy.context.scene
     Ks, Es = [], []
     for f in frames:
         s.frame_set(f)
         dg = bpy.context.evaluated_depsgraph_get()
-        Ks.append(Intrinsics.from_camera(cam, s, dg).K())
-        M = np.array(cam.evaluated_get(dg).matrix_world) @ np.diag([1.0, -1, -1, 1])
-        # Camera scale is not part of a Euclidean world-to-camera pose.
-        M[:3, :3] /= np.linalg.norm(M[:3, :3], axis=0)
-        if not np.allclose(M[:3, :3].T @ M[:3, :3], np.eye(3), atol=1e-6) or np.linalg.det(M[:3, :3]) < 0:
-            raise ValueError("camera transform contains shear or reflection")
-        Es.append(np.linalg.inv(M))
+        K, E = evaluated_camera_matrices(cam, s, dg)
+        Ks.append(K)
+        Es.append(E)
     return np.stack(Ks), np.stack(Es)
 
 
@@ -775,9 +783,17 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
         tracker.report["instances"]["identity"] = "parent/source/persistent_id; segmentation uses source template"
         tracker.report["instances"]["keys"] = [dict(parent=i["parent"], source=i["src"],
             persistent_id=list(i["key"][2]), points=len(i["ti"])) for i in tracker.inst]
+    # Fix render resolution before calibration, then capture all cameras during
+    # the existing tracking sweep. Replaying all frames per camera needlessly
+    # reevaluates dense animated vegetation and particle systems four times.
+    fo, dev, devtype = setup_render(samples=samples, device=device)
+    calibration = [[] for _ in cameras]
     for f in frames:
         s.frame_set(f)
         tracker.step()
+        dg = bpy.context.evaluated_depsgraph_get()
+        for values, cam in zip(calibration, cameras):
+            values.append(evaluated_camera_matrices(cam, s, dg))
         if (f - fs + 1) % 24 == 0 or f == fe:
             logger.info("p4d evaluated tracks: %d/%d frames", f - fs + 1, T)
     if tracker.report["dropped_topology"]:
@@ -798,7 +814,6 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
         motion["vertex_motion"] = vertex_motion_report(chk, sorted({fs, fs + (fe - fs) // 4, (fs + fe) // 2,
                                                                      fs + 3 * (fe - fs) // 4, fe}))
     # render
-    fo, dev, devtype = setup_render(samples=samples, device=device)
     s.cycles.seed = int(seed)
     s.cycles.use_animated_seed = False
     rtimes = []
@@ -806,13 +821,15 @@ def export_scene(out, cameras, family, seed, views_meta=None, motion=None, sampl
         cam.data.dof.use_dof = False
         vd = out / f"view_{v:02d}"
         vd.mkdir(exist_ok=True)
-        K, E = camera_matrices(cam, frames)
+        K = np.stack([entry[0] for entry in calibration[v]])
+        E = np.stack([entry[1] for entry in calibration[v]])
         np.savez(vd / "camera.npz", K=K, E_world2cv=E,
                  timestamps_s=np.arange(T, dtype=np.float64) / (s.render.fps / s.render.fps_base))
         s.camera = cam
         fo.base_path = str(vd / "passes_")
         s.render.filepath = str(vd / "rgb_")
         tv = time.time()
+        logger.info("p4d rendering view %d: %d frames, %d samples", v, T, samples)
         bpy.ops.render.render(animation=True)
         rtimes.append(time.time() - tv)
         logger.info(f"p4d rendered view {v} in {rtimes[-1]:.1f}s")

@@ -91,7 +91,15 @@ def run(out):
     meta = gt.export_scene(out / "calibration", cams, "calibration", 0, samples=8,
                            n_mesh=200, n_static=400, n_inst=0,
                            views_meta=[dict(view_id=i, path_type="fixture", jitter=False) for i in range(4)])
+    cache_error = 0.
+    for i, cam in enumerate(cams):
+        recorded = np.load(out / "calibration" / f"view_{i:02d}" / "camera.npz")
+        K, E = gt.camera_matrices(cam, range(1, 5))
+        cache_error = max(cache_error, float(np.max(np.abs(K - recorded["K"]))),
+                          float(np.max(np.abs(E - recorded["E_world2cv"]))))
+    assert cache_error < 1e-10, cache_error
     result = dict(camera_oracle_max_error_px=max(errors), device=meta["render"]["device"],
+                  cached_camera_max_error=cache_error,
                   blender=meta["render"]["blender_version"], render_seconds=meta["timing"]["render_per_view_s"])
     (out / "checks.json").write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
