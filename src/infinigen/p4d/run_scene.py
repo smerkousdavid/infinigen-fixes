@@ -25,6 +25,7 @@ import logging
 import math
 import os
 import subprocess
+import shutil
 import sys
 import time
 import hashlib
@@ -69,7 +70,9 @@ def nature_gin(family, rng, a):
         wind = float(rng.uniform(0.05, 0.1))
         flutter = float(rng.uniform(0.01, 0.03))
         extra = ["compose_nature.leaf_particles_chance=1.0", "compose_nature.ground_creatures_chance=0.0",
-                 "compose_nature.flying_creatures_chance=0.0", "compose_nature.trees_chance=1.0"]
+                 "compose_nature.flying_creatures_chance=0.0", "compose_nature.trees_chance=1.0",
+                 "compose_nature.max_tree_species=1", "compose_nature.tree_density=0.04",
+                 "compose_nature.max_bush_species=1", "compose_nature.bush_density=0.04"]
     if a.nature_config:
         scene = a.nature_config
     n_cams = a.views * (3 if a.overlap == "all" else 1)
@@ -115,6 +118,21 @@ def run_nature(a, out):
         cmd = drv + base[:] + args + ["-p", *over, *extra_p]
         done = previous.get("stages", {}).get(name, {})
         stage_out = Path(args[args.index("--output_folder") + 1])
+        if name == "coarse" and a.reuse_coarse and not stage_out.exists():
+            source = a.reuse_coarse
+            recorded = json.loads((source / "resolved_config.json").read_text())
+            for key in ("family", "seed", "frames", "fps", "width", "height", "views", "overlap", "nature_config"):
+                if recorded[key] != getattr(a, key):
+                    raise ValueError(f"coarse scene has incompatible {key}: {recorded[key]}")
+            prior = json.loads((source / "run.json").read_text())["stages"]["coarse"]
+            if prior["exit"] != 0:
+                raise ValueError("cannot reuse a failed coarse stage")
+            shutil.copytree(source / "coarse", stage_out)
+            info["stages"][name] = dict(wall_s=0., exit=0, cmd=cmd, reused_from=str(source),
+                source_stage=prior, source_configuration=recorded,
+                blend_sha256=hashlib.sha256((stage_out / "scene.blend").read_bytes()).hexdigest())
+            (out / "run.json").write_text(json.dumps(info, indent=1))
+            continue
         if done.get("exit") == 0 and done.get("cmd") == cmd and (stage_out / "scene.blend").exists():
             info["stages"][name] = dict(done, resumed=True)
             continue
@@ -494,6 +512,7 @@ def main():
     ap.add_argument("--nature-config", choices=("desert.gin", "plain.gin", "forest.gin"))
     ap.add_argument("--reuse-room", type=Path, help="reuse a saved furnished room of the same seed")
     ap.add_argument("--reuse-prepared", type=Path, help="reuse baked indoor motion/rigs with recorded artifact provenance")
+    ap.add_argument("--reuse-coarse", type=Path, help="reuse a successful nature coarse stage with recorded provenance")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=360)
     ap.add_argument("--views", type=int, default=4)
@@ -504,6 +523,8 @@ def main():
         ap.error("overlap curriculum requires four cameras per clip")
     if a.reuse_prepared and (a.family.startswith("nature") or a.reuse_room):
         ap.error("--reuse-prepared requires an indoor family and cannot combine with --reuse-room")
+    if a.reuse_coarse and not a.family.startswith("nature"):
+        ap.error("--reuse-coarse requires a nature family")
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(name)s] %(message)s", datefmt="%H:%M:%S")
     a.out.mkdir(parents=True, exist_ok=True)
     config_path = a.out / "resolved_config.json"

@@ -81,6 +81,7 @@ def run_one(fam, seed, a):
         os.replace(clips[0], target)
         rec["clips"].append(dict(file=target.name, sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
                                   bytes=target.stat().st_size, raw=str(raw), overlap=gates["overlap"],
+                                  gates=gates,
                                   row=json.loads(report.read_text())["row"]))
     # Raw data and diagnostic logs remain until a verified-transfer receipt exists.
     rec.update(status="ok", end=time.time(), wall_s=round(time.time() - rec["start"], 1))

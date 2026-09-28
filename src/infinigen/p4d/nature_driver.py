@@ -147,11 +147,30 @@ def animate_multiview(cam_rigs, base_views, scene_preprocessed, obj_groups=None,
                 cam.data.sensor_height = 36. * scene.render.resolution_y / scene.render.resolution_x
                 cam.data.dof.use_dof = False
                 intrs.append(C.Intrinsics.from_camera(cam, scene, bpy.context.evaluated_depsgraph_get()))
-            sampled = sample_rig(rng, T, fps, intrs, anchor_fn, target, tier, clearance_fn, ray_fn)
+            tier_targets, target_names = [target] * 4, [target_name] * 4
+            if tier == "low":
+                # Look across different parts of the same scene. Opposing views
+                # of an open ground plane can still have high surface overlap.
+                tier_targets, target_names = [], []
+                for i, offset in enumerate(([6, 0, 0], [-6, 0, 0], [0, 6, 0], [0, -6, 0])):
+                    if i < len(moving):
+                        name = list(moving)[i]
+                        region = moving[name] + [0, 0, .6]
+                    else:
+                        centre = target[0] + offset
+                        gz = ground_z(*centre[:2])
+                        if gz is None:
+                            raise ValueError("low-overlap target misses terrain")
+                        centre[2] = gz + .7
+                        region, name = np.tile(centre, (T, 1)), f"vegetation_region_{i}"
+                    tier_targets.append(region)
+                    target_names.append(name)
+            sampled = sample_rig(rng, T, fps, intrs, anchor_fn, target, tier, clearance_fn, ray_fn,
+                                 view_targets=tier_targets)
             for i, (rig, view) in enumerate(zip(rigs, sampled)):
                 C.blender_apply_path(rig, view["pos"], view["R"], frame_start=fs)
                 meta = dict(view["meta"], view_id=i, seed=int(P4D["seed"] * 100 + k * 4 + i),
-                            target_object=target_name, lens_mm=lens)
+                            target_object=target_names[i], lens_mm=lens)
                 rig["p4d_view"] = json.dumps(meta)
                 metas.append(meta)
         scene["p4d_motion"] = json.dumps({"creature_walks": walks, "moving_pois": list(moving)})

@@ -267,7 +267,7 @@ def bake_contact_gait(root, arma, targets, bvh):
                 p = (1 - ease) * contacts[int(cycle)] + ease * contacts[int(cycle) + 1]
                 p[2] += lift * np.sin(np.pi * u)
             values.append(p)
-            stance.append(planted)
+            stance.append(bool(planted))
         foot.parent = None
         foot.matrix_world = world_pose
         foot.animation_data_clear()
@@ -286,8 +286,11 @@ def bake_contact_gait(root, arma, targets, bvh):
         reports.append(dict(target=foot.name, bone=bones[0], stance=stance, cycles=cycles.tolist(),
                             target_world=values.tolist(),
                             stance_slip_max_m=float(slip.max(initial=0))))
-    root["p4d_gait_report"] = json.dumps(dict(gait=gait, armature=arma.name, stride_m=stride, duty_factor=duty,
-                                               root_distance_m=float(distance[-1]), feet=reports))
+    report = dict(gait=gait, armature=arma.name, stride_m=stride, duty_factor=duty,
+                  root_distance_m=float(distance[-1]), feet=reports)
+    report["evaluated_contacts"] = evaluate_contacts(report, frames)
+    logger.info("p4d evaluated %s gait: %s", gait, report["evaluated_contacts"])
+    root["p4d_gait_report"] = json.dumps(report)
     root["p4d_kind"] = "creature"
     scene.frame_set(fs)
     return []
