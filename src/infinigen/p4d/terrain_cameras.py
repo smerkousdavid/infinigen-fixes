@@ -3,7 +3,7 @@ import json
 import numpy as np
 
 
-def reaim_creature_high(compact=False):
+def reaim_creature_high(compact=False, seed=0):
     """Keep prepared trajectories, aiming all high views at evaluated actors.
 
     A formerly fixed-aim near-static view becomes a tracking pan. Original
@@ -46,13 +46,14 @@ def reaim_creature_high(compact=False):
         previous_type = meta['path_type']
         if compact:
             path_type = ('spin', 'crane', 'dolly', 'handheld')[i]
-            rng = np.random.default_rng(193101 + i)
+            path_seed = [int(seed), i, 193]
+            rng = np.random.default_rng(np.random.SeedSequence(path_seed))
             anchor = matrices[0, 0, :3, 3] + rng.normal(0, .015, 3)
             scale = float(np.linalg.norm(target[0] - anchor))
             base_pos, base_R, params = C.PATHS[path_type](rng, len(frames), anchor, target, scale,
                 fps=scene.render.fps / scene.render.fps_base, track_target=True,
                 dz=.08, drift_scale=.002, frac=.01, side_scale=.001, speed=.01, look_noise_deg=.1)
-            meta.update(path_type=path_type, params=params, compact_high_seed=193101 + i)
+            meta.update(path_type=path_type, params=params, compact_high_seed=path_seed)
         if jitter:
             delta = pos - np.asarray(jitter['pre_jitter_pos'])
             noise = np.swapaxes(np.asarray(jitter['pre_jitter_R_cw']), 1, 2) @ old_R

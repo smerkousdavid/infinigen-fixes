@@ -35,7 +35,7 @@ def run(source, out, reaim_high=False, compact_high=False):
     report['camera_terrain'] = repair_creature_cameras()
     if reaim_high or compact_high:
         from infinigen.p4d.terrain_cameras import reaim_creature_high
-        report['camera_high_reaim'] = reaim_creature_high(compact=compact_high)
+        report['camera_high_reaim'] = reaim_creature_high(compact=compact_high, seed=config['seed'])
     report["gaits"] = {obj.name: json.loads(obj["p4d_gait_report"]) for obj in bpy.context.scene.objects
                        if obj.get("p4d_gait_report")}
     bpy.context.scene["p4d_motion_preparation"] = json.dumps(source_identity())
