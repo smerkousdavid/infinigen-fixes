@@ -434,6 +434,8 @@ class Tracker:
                     if srcname not in srcmesh:
                         co, tri = local_mesh(src)
                         srcmesh[srcname] = co, tri, tri_areas(co, tri)
+                if frames and ((frame - frames[0] + 1) % 24 == 0 or frame == frames[-1]):
+                    logger.info("p4d instance discovery: frame %d, %d lifetime identities", frame, len(candidates))
             keys = sorted(candidates)
             if keys:
                 # Dense grass scatters can outnumber falling leaves by 1000:1.
@@ -633,6 +635,49 @@ def clearance_candidates(objects, points, upper_bounds, depsgraph):
     return candidates
 
 
+def bounded_mesh_clearance(objects, points, upper_bounds, depsgraph):
+    """Exact nearest distances, pruning faces outside the current search radii.
+
+    Large water meshes can span an entire scene. Object bounds alone cannot
+    prune them, but triangle bounds can exclude distant faces before BVH build.
+    A face is retained if its AABB can intersect any camera's search sphere.
+    """
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+    vertices, triangles, offset = [], [], 0
+    for obj in objects:
+        co, tri = eval_mesh(obj, depsgraph)
+        if co is None or not len(tri):
+            continue
+        selected = []
+        for start in range(0, len(tri), 65536):
+            chunk = tri[start:start + 65536]
+            corners = co[chunk]
+            if not np.isfinite(corners).all():
+                raise ValueError(f"nonfinite collision geometry: {obj.name}")
+            lo, hi = corners.min(1), corners.max(1)
+            keep = np.zeros(len(chunk), bool)
+            for point, radius in zip(points, upper_bounds):
+                delta = np.maximum(np.maximum(lo - point, point - hi), 0)
+                keep |= np.einsum("ij,ij->i", delta, delta) <= (radius + 1e-5)**2
+            if keep.any():
+                selected.append(chunk[keep])
+        if selected:
+            used, remapped = np.unique(np.concatenate(selected), return_inverse=True)
+            vertices.append(co[used])
+            triangles.append(remapped.reshape(-1, 3) + offset)
+            offset += len(used)
+    result = np.asarray(upper_bounds).copy()
+    if vertices:
+        bvh = BVHTree.FromPolygons(np.concatenate(vertices).tolist(), np.concatenate(triangles).tolist(),
+                                  all_triangles=True)
+        for i, point in enumerate(points):
+            hit = bvh.find_nearest(Vector(point))
+            if hit[0] is not None:
+                result[i] = min(result[i], hit[3])
+    return result
+
+
 def clearance_report(objects, cameras, frames, *, broadphase=True):
     """Check every evaluated camera frame against static and moving mesh geometry."""
     import bpy
@@ -653,8 +698,11 @@ def clearance_report(objects, cameras, frames, *, broadphase=True):
         candidates = clearance_candidates(moving, p, result[t], dg) if broadphase else moving
         candidate_counts.append(len(candidates))
         if candidates:
-            dynamic_clear, _, _ = blender_bvh_callbacks(candidates, dg)
-            result[t] = np.minimum(result[t], dynamic_clear(p))
+            if broadphase:
+                result[t] = bounded_mesh_clearance(candidates, p, result[t], dg)
+            else:
+                dynamic_clear, _, _ = blender_bvh_callbacks(candidates, dg)
+                result[t] = np.minimum(result[t], dynamic_clear(p))
     if np.any(result < .3):
         t, v = np.unravel_index(np.argmin(result), result.shape)
         raise ValueError(f"camera {v} violates 0.3m clearance at frame {frames[t]}: {result[t, v]:.4f}m")
