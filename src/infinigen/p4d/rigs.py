@@ -52,7 +52,7 @@ def sample_rig(rng, T, fps, intrinsics, anchor_fn, target, tier, clearance_fn, r
     # High-overlap paths share an action, but still have independent motion.
     # A fixed aim loses overlap as the action crosses the frame. An in-place
     # tracking pan keeps its distinct path while following the shared action.
-    pool = ("spin", "crane", "dolly", "follow") if tier == "high" else C.PATH_TYPES
+    pool = ("spin", "crane", "dolly", "handheld") if tier == "high" else C.PATH_TYPES
     types = list(rng.choice(pool, 4, replace=False))
     jitter_view = int(rng.integers(4))
     last = None
@@ -61,7 +61,7 @@ def sample_rig(rng, T, fps, intrinsics, anchor_fn, target, tier, clearance_fn, r
             types = list(rng.choice(pool, 4, replace=False))
         anchor0 = np.asarray(anchor_fn(rng), float)
         scale = max(1.0, np.linalg.norm(anchor0 - target[0]))
-        spread = .015 if tier == "high" else .22
+        spread = .003 if tier == "high" else .22
         views = []
         try:
             for v in range(4):
@@ -74,10 +74,11 @@ def sample_rig(rng, T, fps, intrinsics, anchor_fn, target, tier, clearance_fn, r
                 kwargs = dict(dz=.08 if tier == "high" else .25,
                               track_target=tier == 'high' and np.ptp(tgt, axis=0).max() > .01,
                               pitch_amp_deg=.5 if tier == 'high' else float(rng.uniform(0, 10)),
-                              drift_scale=.01 if tier == 'high' else .1,
-                              side_scale=.01 if tier == 'high' else .1,
-                              frac=.04 if tier == "high" else .12,
-                              speed=.025 if tier == "high" else .08,
+                              drift_scale=.002 if tier == 'high' else .1,
+                              side_scale=.001 if tier == 'high' else .1,
+                              look_noise_deg=.1 if tier == 'high' else 8.,
+                              frac=.01 if tier == "high" else .12,
+                              speed=.01 if tier == "high" else .08,
                               arc_deg=float(rng.uniform(4, 12)),
                               yaw_sweep_deg=float(rng.uniform(5, 15)),
                               pitch_deg=float(np.degrees(np.arctan2(tgt[0, 2] - anchor[2],

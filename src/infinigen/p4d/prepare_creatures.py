@@ -11,7 +11,7 @@ from infinigen.p4d.runtime import configure_cpu_budget, source_identity
 configure_cpu_budget()
 
 
-def run(source, out, reaim_high=False):
+def run(source, out, reaim_high=False, compact_high=False):
     import bpy
     from infinigen.p4d import gt
     from infinigen.p4d.motion.creatures import prepare_scene_contacts
@@ -33,9 +33,9 @@ def run(source, out, reaim_high=False):
     report = prepare_scene_contacts()
     from infinigen.p4d.terrain_cameras import repair_creature_cameras
     report['camera_terrain'] = repair_creature_cameras()
-    if reaim_high:
+    if reaim_high or compact_high:
         from infinigen.p4d.terrain_cameras import reaim_creature_high
-        report['camera_high_reaim'] = reaim_creature_high()
+        report['camera_high_reaim'] = reaim_creature_high(compact=compact_high)
     report["gaits"] = {obj.name: json.loads(obj["p4d_gait_report"]) for obj in bpy.context.scene.objects
                        if obj.get("p4d_gait_report")}
     bpy.context.scene["p4d_motion_preparation"] = json.dumps(source_identity())
@@ -55,7 +55,8 @@ if __name__ == "__main__":
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument('--reaim-high', action='store_true')
+    parser.add_argument('--compact-high', action='store_true')
     args = parser.parse_args()
-    run(args.source, args.out, args.reaim_high)
+    run(args.source, args.out, args.reaim_high, args.compact_high)
     sys.stdout.flush()
     os._exit(0)

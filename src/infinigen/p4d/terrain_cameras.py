@@ -3,12 +3,13 @@ import json
 import numpy as np
 
 
-def reaim_creature_high():
+def reaim_creature_high(compact=False):
     """Keep prepared trajectories, aiming all high views at evaluated actors.
 
     A formerly fixed-aim near-static view becomes a tracking pan. Original
     jitter is retained as a local rotation relative to the newly authored aim.
-    Geometry, actor motion, medium cameras and low cameras are untouched.
+    The compact option authors close but distinct pan/crane/dolly/handheld
+    trajectories. Geometry, actor motion, medium and low cameras are untouched.
     """
     import bpy
     from infinigen.core.placement.camera import get_camera_rigs
@@ -21,6 +22,8 @@ def reaim_creature_high():
     target = np.mean([value.mean(1) for value in bounds.values()], axis=0)
     rigs = get_camera_rigs()
     selected = [r for r in rigs if json.loads(r['p4d_view']).get('overlap_target') == 'high']
+    if len(selected) != 4:
+        raise ValueError('requires four high-overlap cameras')
     matrices = []
     for frame in frames:
         scene.frame_set(frame)
@@ -28,6 +31,8 @@ def reaim_creature_high():
         matrices.append([np.asarray(next(c for c in r.children if c.type == 'CAMERA').evaluated_get(dg).matrix_world)
                          for r in selected])
     matrices = np.asarray(matrices)
+    from infinigen.p4d.motion.creatures import terrain_bvh
+    ground = terrain_bvh(render_only=True) if compact else None
     records = []
     for i, rig in enumerate(selected):
         cam = next(c for c in rig.children if c.type == 'CAMERA')
@@ -36,17 +41,33 @@ def reaim_creature_high():
         meta = json.loads(rig['p4d_view'])
         pos, old_R = matrices[:, i, :3, 3], matrices[:, i, :3, :3]
         jitter = meta.get('jitter_params') if meta.get('jitter') else None
+        base_pos = np.asarray(jitter['pre_jitter_pos']) if jitter else pos.copy()
+        base_R = C.look_rotation(target - base_pos)
+        previous_type = meta['path_type']
+        if compact:
+            path_type = ('spin', 'crane', 'dolly', 'handheld')[i]
+            rng = np.random.default_rng(193101 + i)
+            anchor = matrices[0, 0, :3, 3] + rng.normal(0, .015, 3)
+            scale = float(np.linalg.norm(target[0] - anchor))
+            base_pos, base_R, params = C.PATHS[path_type](rng, len(frames), anchor, target, scale,
+                fps=scene.render.fps / scene.render.fps_base, track_target=True,
+                dz=.08, drift_scale=.002, frac=.01, side_scale=.001, speed=.01, look_noise_deg=.1)
+            meta.update(path_type=path_type, params=params, compact_high_seed=193101 + i)
         if jitter:
-            base_pos = np.asarray(jitter['pre_jitter_pos'])
+            delta = pos - np.asarray(jitter['pre_jitter_pos'])
             noise = np.swapaxes(np.asarray(jitter['pre_jitter_R_cw']), 1, 2) @ old_R
-            base_R = C.look_rotation(target - base_pos)
+            pos = base_pos + delta
             R = base_R @ noise
+            jitter['pre_jitter_pos'] = base_pos.tolist()
             jitter['pre_jitter_R_cw'] = base_R.tolist()
         else:
-            R = C.look_rotation(target - pos)
+            pos, R = base_pos, base_R
+        if compact and (ground is None or heights_above_terrain(pos, ground).min() < .3):
+            raise ValueError('compact high path has inadequate terrain clearance')
         C.blender_apply_path(rig, pos, R, frame_start=frames[0])
-        record = dict(camera=cam.name, previous_path_type=meta['path_type'],
-                      aim='evaluated creature group centre', translation_unchanged=True)
+        record = dict(camera=cam.name, previous_path_type=previous_type,
+                      aim='evaluated creature group centre', translation_unchanged=not compact,
+                      compact=compact)
         if meta['path_type'] == 'static':
             meta['path_type'] = 'spin'
         meta['params']['aim'] = 'evaluated creature group centre'

@@ -276,7 +276,7 @@ def path_handheld(rng, T, anchor, target, scale, fps=24.0, **kw):
     pos = anchor + np.cumsum(vel * dt, axis=0)
     if target is not None:
         look = _target_at(target, T) - pos
-        yaw_n = ou_process(rng, T, 2, math.radians(8), theta=0.5, dt=dt)
+        yaw_n = ou_process(rng, T, 2, math.radians(kw.get('look_noise_deg', 8)), theta=0.5, dt=dt)
         base = look_rotation(look)
         R = base @ small_rotation(np.concatenate([yaw_n, np.zeros((T, 1))], 1))
     else:

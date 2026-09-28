@@ -86,6 +86,10 @@ overlap. It is an early rejection check; final acceptance still measures all
 instead of a fixed aim that can lose moving actors. For existing creature scenes,
 `prepare_creatures --reaim-high` explicitly re-aims the high rig while preserving
 its translations and authored jitter; check its rendered overlap before reuse.
+`--compact-high` additionally rebuilds only the high camera paths as a close
+tracking pan, crane, dolly and handheld walk, retaining the authored jitter.
+This avoids a long following-camera translation pulling dense vegetation views
+out of the high-overlap range. Actor geometry and motion remain unchanged.
 
 ## Overlap curriculum
 
