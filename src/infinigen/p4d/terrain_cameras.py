@@ -3,6 +3,14 @@ import json
 import numpy as np
 
 
+def _identity_camera_child(cam, rig):
+    # matrix_local is reconstructed from world matrices and loses micrometres
+    # at large world coordinates. Check the authored transforms instead.
+    return (cam.parent == rig and not cam.constraints
+            and np.allclose(cam.matrix_basis, np.eye(4), atol=1e-6)
+            and np.allclose(cam.matrix_parent_inverse, np.eye(4), atol=1e-6))
+
+
 def reaim_creature_high(compact=False, seed=0):
     """Keep prepared trajectories, aiming all high views at evaluated actors.
 
@@ -46,7 +54,7 @@ def reaim_high_cameras(target, compact=False, seed=0, aim='shared scene target')
     records = []
     for i, rig in enumerate(selected):
         cam = next(c for c in rig.children if c.type == 'CAMERA')
-        if rig.parent is not None or not np.allclose(cam.matrix_local, np.eye(4), atol=1e-6):
+        if rig.parent is not None or not _identity_camera_child(cam, rig):
             raise ValueError('re-aim requires an unparented rig and identity camera child')
         meta = json.loads(rig['p4d_view'])
         pos, old_R = matrices[:, i, :3, 3], matrices[:, i, :3, :3]
@@ -136,7 +144,7 @@ def repair_creature_cameras():
         before = float(heights[:, i].min())
         if before >= .3:
             continue
-        if not np.allclose(cam.matrix_local, np.eye(4), atol=1e-6) or rig.parent is not None:
+        if not _identity_camera_child(cam, rig) or rig.parent is not None:
             raise ValueError("terrain repair requires an unparented rig and identity camera child")
         lift = 1.7 - before
         pos = positions[:, i].copy()
