@@ -20,6 +20,7 @@ def run(out):
     bpy.ops.mesh.primitive_ico_sphere_add(radius=.15, location=(100, 100, 100))
     source = bpy.context.object
     source.name = "particle_source"
+    source["p4d_kind"] = "static"  # test its instances, not the off-camera template
     bpy.ops.mesh.primitive_plane_add(size=2, location=(0, 0, 1.5))
     emitter = bpy.context.object
     emitter.name = "emitter"
@@ -29,6 +30,10 @@ def run(out):
     particles.frame_start, particles.frame_end, particles.lifetime = 1, 3, 20
     particles.normal_factor, particles.particle_size = 0, 1
     particles.render_type, particles.instance_object = "OBJECT", source
+    particles.use_scale_instance = True
+    for frame, size in ((1, 1.), (3, 1.), (4, 0.), (5, 1.), (8, 1.)):
+        source.scale = (size, size, size)
+        source.keyframe_insert("scale", frame=frame)
     emitter.show_instancer_for_render = emitter.show_instancer_for_viewport = False
     bpy.ops.object.light_add(type="AREA", location=(0, -2, 5))
     bpy.context.object.data.energy = 400
@@ -44,10 +49,13 @@ def run(out):
     assert np.all(tracks["pass_index"][particle_tracks] == source.pass_index)
     alive = np.isfinite(tracks["xyz_world"][:, particle_tracks]).all(-1)
     assert np.any(~alive[0] & alive[-1]), "particles born after frame 1 were missed"
+    assert not alive[3].any(), "collapsed particles must not fabricate a surface"
+    assert meta["tracks"]["report"].get("degenerate_instance_frames", 0) > 0
     index = gt._exr(out / "view_00" / "passes_0008.exr")["IndexOB.V"]
     assert np.any(np.round(index) == source.pass_index), "track IDs do not match rendered instances"
     assert meta["tracks"]["by_kind"]["particle"] == 80
     report = dict(PASS=True, particle_tracks=80, later_born_tracks=int((~alive[0] & alive[-1]).sum()),
+                  collapsed_instance_frames=meta["tracks"]["report"]["degenerate_instance_frames"],
                   instance_granularity="source_template")
     (out / "regression.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report))
