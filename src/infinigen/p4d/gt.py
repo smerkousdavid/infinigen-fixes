@@ -741,7 +741,7 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
     """render.render_image_func replacement: renders ALL camera rigs (subcam 0) + unified tracks."""
     import bpy
 
-    from infinigen.core.util import camera as cam_util
+    from infinigen.core.placement import camera as cam_util
     from infinigen.p4d.motion import wind
 
     s = bpy.context.scene
@@ -766,7 +766,7 @@ def p4d_render_image(frames_folder, camera=None, family="nature", seed=0, out_di
                     or contact["terrain_height_error_p95_m"] is None or contact["terrain_height_error_p95_m"] > .03):
                 raise ValueError(f"evaluated foot contacts failed before rendering: {obj.name}: {contact}")
     rigs = cam_util.get_camera_rigs()
-    cams = [r.children[0] for r in rigs]
+    cams = [next(c for c in r.children if c.type == "CAMERA") for r in rigs]
     views = [json.loads(r["p4d_view"]) if "p4d_view" in r else {"path_type": "infinigen_default"} for r in rigs]
     motion = json.loads(s["p4d_motion"]) if "p4d_motion" in s else {}
     tw = time.time()
