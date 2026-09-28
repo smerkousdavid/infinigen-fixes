@@ -31,6 +31,9 @@ import time
 import hashlib
 from pathlib import Path
 
+from infinigen.p4d.runtime import configure_cpu_budget
+configure_cpu_budget()
+
 import numpy as np
 
 logger = logging.getLogger("p4d.run_scene")

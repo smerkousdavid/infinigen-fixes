@@ -77,9 +77,13 @@ def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_
         require(q.get("n", 0) >= 16 and q.get("dynamic_fraction", 0) > 0,
                 f"missing moving {kind} tracks")
         require(q.get("n_dynamic_visible", 0) >= 16, f"too few visible moving {kind} tracks")
-        flow = quality.get("flow_per_kind", {}).get(kind, {})
+        flow = quality.get("flow_dynamic_per_kind", {}).get(kind, {})
         require(flow.get("n", 0) >= 16 and flow.get("median_epe_px", float("inf")) <= 1.,
                 f"missing/failed independent flow evidence for {kind}")
+    def visible_motion(name):
+        tracks = quality.get("tracks_per_object", {}).get(name, {})
+        flow = quality.get("flow_dynamic_per_object", {}).get(name, {})
+        return tracks.get("n_dynamic_visible", 0) >= 16 and flow.get("n", 0) >= 16 and flow.get("median_epe_px", float("inf")) <= 1.
     require(not scene.get("tracks", {}).get("report", {}).get("dropped_topology"), "tracked topology changed")
     if family == "nature_creatures":
         gaits = scene["motion"].get("gaits", {})
@@ -99,12 +103,15 @@ def check(raw, clip_tar, expected_frames=96, expected_size=(640, 360), expected_
         joints = [j for a in scene["motion"].get("articulated", []) for j in a.get("joints", [])]
         require({j["kind"] for j in joints if np.ptp(j.get("q", [0])) > .02} >= {"hinge", "slide"},
                 "both hinge and sliding motion required")
+        for asset in scene["motion"].get("articulated", []):
+            require(visible_motion(asset.get("object")), f"articulated asset motion is not visibly verified: {asset.get('object')}")
     if family == "indoor_physics":
         physics = scene["motion"].get("physics", {})
         stats = physics.get("stats", {})
         for motion in ("drops", "slides", "rolls", "chairs"):
             require(any(stats.get(record["object"], {}).get("max_disp_m", 0) > .05
-                        for record in physics.get(motion, [])), f"missing effective physics motion: {motion}")
+                        and visible_motion(record["object"])
+                        for record in physics.get(motion, [])), f"missing visible effective physics motion: {motion}")
         require(physics.get("simulation", {}).get("initial_velocity") == "explicit", "unverified physics impulse")
     result = dict(PASS=not failures, failures=failures, family=family, clip=meta["key"],
                   overlap=overlap, cross_view_evidence=quality.get("cross_view_pairs", 0))

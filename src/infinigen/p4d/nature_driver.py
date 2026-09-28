@@ -24,6 +24,9 @@ import os
 import runpy
 import sys
 
+from infinigen.p4d.runtime import configure_cpu_budget
+configure_cpu_budget()
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -255,8 +258,10 @@ def main():
     from infinigen.core.placement import camera_trajectories as cam_traj
     from infinigen.p4d import gt  # noqa: F401  (registers @p4d_render_image)
     from infinigen.p4d.motion import creatures
+    from infinigen.p4d.visibility import patch_population_visibility
 
     creatures.patch_populate()
+    patch_population_visibility()
     if P4D["overlap"] != "none":
         original_poses = cam_traj.compute_poses
 

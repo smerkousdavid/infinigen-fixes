@@ -197,7 +197,8 @@ def apply_wind(objects, strength=0.04, gust=0.5, flutter=0.0, freq=0.4, directio
         o["p4d_kind"] = "wind"
         done[o.name] = dict(prm, direction=(d.x, d.y, d.z))
     logger.info(f"p4d wind on {len(done)} objects (strength={strength}, gust={gust}, flutter={flutter})")
-    return dict(direction_deg=math.degrees(yaw), field_frame="world", n_objects=len(done), objects=list(done)[:200],
+    return dict(direction_deg=math.degrees(yaw), field_frame="world for unique geometry; source template for shared instances",
+                n_objects=len(done), objects=list(done)[:200],
                 strength=strength, gust=gust, flutter=flutter)
 
 
